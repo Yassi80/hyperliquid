@@ -1,0 +1,94 @@
+# hlflows sample configuration. Copy to hlflows.toml (or point $HLFLOWS_CONFIG / --config at it).
+# Every key is optional; the values below are the defaults.
+
+[storage]
+db_path = "data/hlflows.sqlite"   # SQLite database (WAL mode)
+data_dir = "data"                 # raw trades, archived positions and exports (Parquet)
+positions_hot_days = 14           # older positions move from SQLite to data/positions/*.parquet
+local_retention_days = 30         # `maintain --prune` deletes local Parquet older than this
+
+[api]
+info_url = "https://api.hyperliquid.xyz/info"
+timeout_s = 20.0
+max_retries = 6                   # retries on 429/5xx/network errors, exponential backoff with jitter
+
+[markets]
+coins = ["BTC", "ETH", "SOL", "HYPE"]
+dex = ""                          # "" = canonical perp dex; name a HIP-3 dex to use it instead
+spot_quote = "USDC"
+spot_primary = ["HYPE"]           # spot markets that are a primary venue; others are low_significance
+
+[markets.spot_tokens]             # perp coin -> Hyperliquid spot base token (resolved via spotMeta)
+BTC = "UBTC"
+ETH = "UETH"
+SOL = "USOL"
+HYPE = "HYPE"
+
+[time]
+week_start = "monday"             # weekly bars open 00:00 UTC on this day
+
+[funding]
+percentile_window_days = 30       # trailing window for premium/funding percentiles
+
+[rate_limit]
+ip_weight_per_min = 1200          # Hyperliquid per-IP REST limit
+ceiling_pct = 60                  # share hlflows may use across all its processes
+
+[show]
+cvd_slope_bars = 20               # N bars in the CVD slope window
+
+[recorder]
+ws_url = "wss://api.hyperliquid.xyz/ws"
+ping_interval_s = 30              # application-level ping; the server drops idle sockets
+dead_after_s = 60                 # reconnect when nothing at all arrives for this long
+stale_trades_s = 300              # reconnect when a perp market has no trades for this long
+stale_ctx_s = 60                  # reconnect when a coin's asset context stops updating
+subscribe_pause_s = 0.1           # pause between subscription messages
+reconnect_base_s = 1              # reconnect backoff: base * 2^attempt, jittered, capped
+reconnect_cap_s = 60
+bar_grace_s = 5                   # build a minute bar this long after the minute ends
+flush_grace_s = 120               # move an hour's raw trades to Parquet this long after it ends
+context_poll_s = 300              # REST metaAndAssetCtxs + predictedFundings
+funding_poll_offset_s = 90        # fetch fundingHistory this long after each hour
+candle_catchup_s = 21600          # refresh 1h/1d candles
+heartbeat_s = 10                  # write stream health for `status`
+
+[wallets]
+manual = []                       # addresses always watched, e.g. ["0xabc..."]
+max_active = 300                  # watchlist size (manual + discovered)
+poll_interval_s = 120             # one clearinghouseState per watched wallet per round (weight 2)
+poll_concurrency = 4
+probe_weight_per_min = 120        # discovery: address probes (2 each) + <=1 userRole check (60)/min
+reprobe_days = 7                  # re-check non-qualifying addresses this often
+dormant_after_h = 24              # drop a discovered wallet after this long without a qualifying position
+exclude_vaults = true             # leave vaults (HLP, userRole "vault") out of aggregates
+exclude_mm = true                 # leave likely market makers out of aggregates
+mm_min_fills = 1000               # market-maker heuristic: at least this many fills seen,
+mm_min_maker_share = 0.9          # at least this share of volume as maker,
+mm_max_position_to_volume = 0.02  # and a position small relative to volume traded
+liq_check_distance_pct = 3.0      # check fills when a shrunk position's liq price was this close
+max_fill_checks_per_round = 10
+liqmap_bucket_pct = 0.5
+liqmap_range_pct = 20.0
+# known_vaults = [...]            # defaults to HLP and its sub-accounts
+# liquidators = [...]             # defaults to the HLP liquidator (0x2e3d...dd14)
+
+[wallets.labels]                  # optional names for manual wallets
+# "0xabc..." = "some whale"
+
+[wallets.large_trade_ntl]         # USD; trades this large move their addresses up the probe queue
+BTC = 1000000
+ETH = 500000
+SOL = 250000
+HYPE = 250000
+
+[wallets.qualify_ntl]             # USD; a position this large puts a wallet on the watchlist
+BTC = 500000
+ETH = 250000
+SOL = 100000
+HYPE = 100000
+
+[liquidation_provider]            # optional paid global liquidation stream; off by default
+name = ""                         # an adapter registered in hlflows/liquidations/providers.py
+api_key = ""
+poll_s = 60

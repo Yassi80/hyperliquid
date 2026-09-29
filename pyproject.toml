@@ -1,0 +1,53 @@
+[project]
+name = "hlflows"
+version = "0.1.0"
+description = "Hyperliquid flows data recorder and CLI (public data only)"
+authors = [
+    { email = "yassi801@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "msgspec>=0.21.1",
+    "polars>=1.44.2",
+    "rich>=15.0.0",
+    "typer>=0.27.2",
+    "websockets>=17.1",
+]
+
+[project.scripts]
+hlflows = "hlflows.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.11.28,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "respx>=0.23.1",
+    "ruff>=0.16.9",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = ["live: hits the real Hyperliquid API (run with HL_LIVE=1)"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["respx.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]

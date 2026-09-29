@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly hlflows sync to GCS
+
+[Timer]
+OnCalendar=*-*-* *:10:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

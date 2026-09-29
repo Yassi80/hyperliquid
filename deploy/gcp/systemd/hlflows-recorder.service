@@ -1,0 +1,27 @@
+[Unit]
+Description=hlflows recorder (Hyperliquid trades, context, wallet positions)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=hlflows
+Group=hlflows
+Environment=HLFLOWS_CONFIG=/etc/hlflows/hlflows.toml
+Environment=COLUMNS=160
+WorkingDirectory=/var/lib/hlflows
+ExecStart=/opt/hlflows-runtime/venv/bin/hlflows record
+# SIGTERM stops it cleanly: buffered trades staged, bars built, context written.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+Restart=always
+RestartSec=15
+MemoryMax=700M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hlflows
+
+[Install]
+WantedBy=multi-user.target

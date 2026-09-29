@@ -1,0 +1,13 @@
+[Unit]
+Description=hlflows: archive positions, sync Parquet to GCS, prune local copies
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=hlflows
+Group=hlflows
+EnvironmentFile=/etc/hlflows/deploy.env
+Environment=HLFLOWS_CONFIG=/etc/hlflows/hlflows.toml
+Environment=CLOUDSDK_CONFIG=/var/lib/hlflows/.gcloud
+ExecStart=/opt/hlflows-runtime/sync.sh
+Nice=10

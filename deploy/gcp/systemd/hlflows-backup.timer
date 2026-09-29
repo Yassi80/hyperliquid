@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily hlflows database backup
+
+[Timer]
+OnCalendar=*-*-* 01:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

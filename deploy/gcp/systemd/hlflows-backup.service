@@ -1,0 +1,13 @@
+[Unit]
+Description=hlflows: daily database backup to GCS
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=hlflows
+Group=hlflows
+EnvironmentFile=/etc/hlflows/deploy.env
+Environment=HLFLOWS_CONFIG=/etc/hlflows/hlflows.toml
+Environment=CLOUDSDK_CONFIG=/var/lib/hlflows/.gcloud
+ExecStart=/opt/hlflows-runtime/backup.sh
+Nice=10
