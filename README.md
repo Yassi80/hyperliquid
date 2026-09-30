@@ -52,6 +52,9 @@ uv run hlflows export --coin ETH --tf 1h --from 2026-09-01 --format parquet
 uv run hlflows export --coin HYPE --tf 1d --from 2026-06-01 --table funding --out hype_funding.csv
 uv run hlflows export --coin BTC --tf 1h --from 2026-10-01 --table positioning
 
+# Self-contained HTML dashboard (all coins; 15m/1h/4h/1d; 200 bars each).
+uv run hlflows dashboard --open
+
 # Housekeeping (the GCP timers run these): archive positions older than
 # storage.positions_hot_days to Parquet; --prune also deletes local Parquet older than
 # storage.local_retention_days (only once it's synced elsewhere). Online DB backup.
@@ -248,6 +251,31 @@ positions ~100 MB in SQLite for the 14-day hot window (~1.4 GB steady state) and
 Parquet, so its disk use levels off around 5–6 GB including the OS; the bucket grows by
 roughly 15–20 GB a year (~$0.30–0.40/month at $0.02/GB-month after the free 5 GB). The VM
 and disk are free-tier; the public IPv4 address may cost ~$3.65/month.
+
+## Dashboard
+
+`hlflows dashboard` writes one self-contained HTML page with every configured coin and
+timeframe. Pick the coin and timeframe in the page's filter row, or bookmark a view
+(`dashboard.html#coin=ETH&tf=4h`). The page loads its charting library (Plotly) from the
+internet.
+
+- **Tiles:** price, funding (hourly, 8h equivalent, premium, premium percentile, share of
+  hours pinned at the interest rate), watchlist positioning with coverage, liquidations.
+- **Last closed bar per timeframe** (15m to 1w): price, OI, delta, CVD slope, spot delta,
+  funding, premium, watchlist Δnet and liquidations, with ▲/▼ for direction.
+- **Stacked charts** sharing one time axis, one panel per measure: price candles, open
+  interest, perp CVD, spot CVD, funding and premium, watchlist long/short notional,
+  watchlist net flow (same wallets, cumulative), liquidations. Hover shows every panel's
+  value at that time; drag to zoom. A **Table** view lists the same numbers per bar.
+- **Liquidation map** of watched positions around the mark.
+
+Colours mean the same thing everywhere: blue = buy / long / up, red = sell / short / down.
+
+```sh
+bash deploy/gcp/dashboard.sh                  # build on the VM from live data, open on your Mac
+bash deploy/gcp/dashboard.sh --bars 400 --tf 1h,4h,1d
+HLFLOWS_CONFIG=~/hlflows-data/hlflows.toml uv run hlflows dashboard --open   # from pulled data
+```
 
 ## Using the data from Python
 

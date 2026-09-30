@@ -67,7 +67,7 @@ def render(cfg: Config, conn: sqlite3.Connection) -> RenderableType:
     for name, r in rows.items():
         if name == "recorder":
             continue
-        count = f"{r['count']:,}"
+        count = "" if name.startswith("rest:") else f"{r['count']:,}"
         if name == "ws":
             count += " reconnects"
         streams.add_row(
@@ -89,12 +89,19 @@ def render(cfg: Config, conn: sqlite3.Connection) -> RenderableType:
                   r["recoverable"], r["reason"])  # fmt: skip
     parts.append(g)
 
-    streams_order = ["bars_1m", "taker_1m", "ctx_1m", "bars_1h", "bars_1d", "funding", "positions"]
+    # Per-market streams in the table; account-level streams (watchlist positions,
+    # liquidator fills) on their own lines below it.
+    streams_order = ["bars_1m", "taker_1m", "ctx_1m", "bars_1h", "bars_1d", "funding"]
+    markets = {r[0] for r in conn.execute("SELECT market FROM markets")}
     ends: dict[str, dict[str, int]] = {}
+    other: list[str] = []
     for r in conn.execute(
         "SELECT stream, market, MAX(end_ts) AS end_ts FROM coverage GROUP BY stream, market"
     ):
-        ends.setdefault(r["market"], {})[r["stream"]] = r["end_ts"]
+        if r["market"] in markets:
+            ends.setdefault(r["market"], {})[r["stream"]] = r["end_ts"]
+        else:
+            other.append(f"{r['stream']} ({r['market']}): {_age(r['end_ts'], now)}")
     cov = Table(title="Covered until (age)", title_justify="left")
     cov.add_column("market")
     for name in streams_order:
@@ -102,6 +109,8 @@ def render(cfg: Config, conn: sqlite3.Connection) -> RenderableType:
     for market in sorted(ends):
         cov.add_row(market, *(_age(ends[market].get(n), now) for n in streams_order))
     parts.append(cov)
+    if other:
+        parts.append(Text("Also covered until: " + "; ".join(sorted(other))))
 
     counts = {
         (r["status"], r["source"]): r["n"]

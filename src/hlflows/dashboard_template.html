@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hlflows dashboard</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+    --buy: #2a78d6; --sell: #e34948;          /* buy / long / up  vs  sell / short / down */
+    --perp: #4a3aa7; --spot: #eb6834; --premium: #1baf7a;
+    --accent-wash: rgba(42,120,214,0.10);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+      --buy: #3987e5; --sell: #e66767; --perp: #9085e9; --spot: #d95926; --premium: #199e70;
+      --accent-wash: rgba(57,135,229,0.16);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+    --buy: #3987e5; --sell: #e66767; --perp: #9085e9; --spot: #d95926; --premium: #199e70;
+    --accent-wash: rgba(57,135,229,0.16);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--ink);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .wrap { max-width: 1440px; margin: 0 auto; padding: 20px 20px 48px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 14px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 650; }
+  .meta { color: var(--ink-2); font-size: 13px; }
+  .filters { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; margin-bottom: 16px;
+             position: sticky; top: 0; z-index: 5; background: var(--page); padding: 8px 0; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+         background: var(--surface); }
+  .seg button { border: 0; background: transparent; color: var(--ink-2); padding: 6px 12px;
+                font: inherit; cursor: pointer; }
+  .seg button + button { border-left: 1px solid var(--border); }
+  .seg button[aria-pressed="true"] { background: var(--accent-wash); color: var(--ink); font-weight: 600; }
+  .seg button:focus-visible { outline: 2px solid var(--buy); outline-offset: -2px; }
+  .label { color: var(--muted); font-size: 12px; margin-right: 6px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px;
+           margin-bottom: 16px; }
+  .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .tile h3 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--muted);
+             text-transform: uppercase; letter-spacing: .04em; }
+  .tile .big { font-size: 22px; font-weight: 650; }
+  .tile .rows { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-size: 13px; margin-top: 4px; }
+  .tile .rows span:nth-child(odd) { color: var(--ink-2); }
+  .tile .rows span:nth-child(even) { text-align: right; font-variant-numeric: tabular-nums; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+          padding: 12px 14px; margin-bottom: 16px; }
+  .card h2 { font-size: 14px; margin: 0 0 8px; font-weight: 650; }
+  .note { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { padding: 5px 8px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  th { color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--axis); }
+  td { border-bottom: 1px solid var(--grid); }
+  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+  .dim { color: var(--muted); }
+  .grid2 { display: grid; grid-template-columns: minmax(0, 3fr) minmax(280px, 1fr); gap: 16px; }
+  @media (max-width: 1000px) { .grid2 { grid-template-columns: 1fr; } }
+  #chart { width: 100%; height: 1180px; }
+  #liqmap { width: 100%; height: 640px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Hyperliquid flows</h1>
+    <span class="meta" id="meta"></span>
+  </header>
+
+  <div class="filters" role="toolbar" aria-label="Filters">
+    <span><span class="label">Coin</span><span class="seg" id="coins"></span></span>
+    <span><span class="label">Timeframe</span><span class="seg" id="tfs"></span></span>
+    <span><span class="label">View</span><span class="seg" id="views"></span></span>
+  </div>
+
+  <div class="tiles" id="tiles"></div>
+
+  <div class="card">
+    <h2>Last closed bar per timeframe</h2>
+    <div class="scroll"><table id="flowtable"></table></div>
+    <p class="note">▲/▼ show direction. Delta and CVD exist only while the recorder was live; "—" means no data for that bar.
+      Watch Δnet = change in the watchlist's net position over the bar (same wallets at both ends, USD at close).
+      Liquidations are partial (watched wallets + backstops).</p>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h2 id="charttitle"></h2>
+      <div id="chart" role="img" aria-label="Stacked flow charts"></div>
+      <div id="tableview" hidden class="scroll"></div>
+      <p class="note">Each panel has its own scale. Blue = buy / long / up, red = sell / short / down.
+        CVD is anchored at the left edge of the window; breaks in a line are periods without data, after which the sum resumes.
+        Watchlist notional also moves as wallets join or leave the watchlist; the net-flow panel counts only wallets present at both ends of each bar.</p>
+    </div>
+    <div class="card">
+      <h2>Liquidation map (watchlist)</h2>
+      <div id="liqmap" role="img" aria-label="Liquidation map"></div>
+      <p class="note" id="liqnote"></p>
+    </div>
+  </div>
+</div>
+
+<script>
+const DATA = /*__DATA__*/null;
+const state = { coin: Object.keys(DATA.coins)[0], tf: DATA.tfs.includes("1h") ? "1h" : DATA.tfs[0], view: "charts" };
+// Bookmarkable views: #coin=ETH&tf=15m&view=table
+for (const [k, v] of new URLSearchParams(location.hash.slice(1))) {
+  if (k === "coin" && v in DATA.coins) state.coin = v;
+  if (k === "tf" && DATA.tfs.includes(v)) state.tf = v;
+  if (k === "view" && ["charts", "table"].includes(v)) state.view = v;
+}
+
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const isNum = (v) => typeof v === "number" && isFinite(v);
+function usd(v) {
+  if (!isNum(v)) return "—";
+  const a = Math.abs(v);
+  for (const [d, s] of [[1e9, "B"], [1e6, "M"], [1e3, "k"]]) if (a >= d) return (v / d).toFixed(1) + s;
+  return v.toFixed(0);
+}
+const num = (v, d = 2) => isNum(v) ? v.toLocaleString(undefined, { maximumFractionDigits: d }) : "—";
+const pct = (v, d = 2) => isNum(v) ? (v > 0 ? "+" : "") + v.toFixed(d) + "%" : "—";
+const arrow = (v) => !isNum(v) || v === 0 ? "" : (v > 0 ? "▲ " : "▼ ");
+const covPct = (v) => isNum(v) ? (v * 100).toFixed(1) + "%" : "—";
+
+function segmented(el, items, current, onPick) {
+  el.innerHTML = "";
+  for (const [value, label] of items) {
+    const b = document.createElement("button");
+    b.type = "button"; b.textContent = label;
+    b.setAttribute("aria-pressed", String(value === current));
+    b.onclick = () => onPick(value);
+    el.appendChild(b);
+  }
+}
+
+function renderFilters() {
+  segmented(document.getElementById("coins"), Object.keys(DATA.coins).map(c => [c, c]), state.coin,
+    v => { state.coin = v; render(); });
+  segmented(document.getElementById("tfs"), DATA.tfs.map(t => [t, t]), state.tf,
+    v => { state.tf = v; render(); });
+  segmented(document.getElementById("views"), [["charts", "Charts"], ["table", "Table"]], state.view,
+    v => { state.view = v; render(); });
+}
+
+function tile(title, big, rows) {
+  const r = rows.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("");
+  return `<div class="tile"><h3>${title}</h3>${big ? `<div class="big">${big}</div>` : ""}<div class="rows">${r}</div></div>`;
+}
+
+function renderTiles(c, t) {
+  const s1d = c.summary.find(r => r.tf === "1d") || {};
+  const f = c.funding, p = c.positioning;
+  const n = t.ts.length;
+  const liqL = t.liq_long.reduce((a, b) => a + b, 0), liqS = t.liq_short.reduce((a, b) => a + b, 0);
+  const lastClose = n ? t.c[n - 1] : null;
+  const html = [
+    tile("Price", num(lastClose, 6), [["1d (last closed)", arrow(s1d.price_chg_pct) + pct(s1d.price_chg_pct)],
+      ["OI 1d", arrow(s1d.oi_chg_pct) + pct(s1d.oi_chg_pct)], ["OI (coin)", num(s1d.oi_close, 0)]]),
+    f ? tile("Funding", pct(f.rate_8h * 100, 4) + " / 8h", [["hourly", pct(f.rate_1h * 100, 5)],
+      ["premium (8h)", pct(f.premium * 100, 4)], ["premium percentile", num(f.premium_pct, 0)],
+      ["hours pinned at interest", covPct(f.pinned_share)], ["settled", f.at]]) : tile("Funding", "—", []),
+    p ? tile("Watchlist positioning", usd(p.net_ntl) + " net", [["long", `${usd(p.long_ntl)} (${p.n_long})`],
+      ["short", `${usd(p.short_ntl)} (${p.n_short})`], ["coverage long / short", `${covPct(p.long_cov)} / ${covPct(p.short_cov)}`],
+      ["eff. leverage L / S", `${num(p.lev_long, 1)}x / ${num(p.lev_short, 1)}x`], ["snapshot", p.snapshot]])
+      : tile("Watchlist positioning", "—", [["", "no snapshots yet"]]),
+    tile(`Liquidations (${state.tf} window)`, usd(liqL + liqS), [["longs liquidated", usd(liqL)],
+      ["shorts liquidated", usd(liqS)], ["source", "watched wallets + backstops"]]),
+  ];
+  document.getElementById("tiles").innerHTML = html.join("");
+}
+
+function renderFlowTable(c) {
+  const head = ["tf", "bar open", "close", "Δ price", "Δ OI", "delta", "CVD slope", "spot delta",
+    "funding 8h", "premium 8h", "watch Δnet", "liqs L / S", "src"];
+  const rows = c.summary.map(r => [
+    r.tf, r.bar || "—", num(r.close, 6), arrow(r.price_chg_pct) + pct(r.price_chg_pct), arrow(r.oi_chg_pct) + pct(r.oi_chg_pct),
+    arrow(r.delta) + num(r.delta), num(r.cvd_slope), num(r.spot_delta),
+    pct(isNum(r.funding_8h) ? r.funding_8h * 100 : null, 4), pct(isNum(r.premium) ? r.premium * 100 : null, 4),
+    arrow(r.watch_dnet_usd) + usd(r.watch_dnet_usd), (r.liq_long || r.liq_short) ? `${usd(r.liq_long)} / ${usd(r.liq_short)}` : "—",
+    (r.source_res || "—") + (r.complete || !r.source_res ? "" : " partial"),
+  ]);
+  document.getElementById("flowtable").innerHTML =
+    `<thead><tr>${head.map(h => `<th scope="col">${h}</th>`).join("")}</tr></thead>` +
+    `<tbody>${rows.map(r => `<tr>${r.map(v => `<td>${v}</td>`).join("")}</tr>`).join("")}</tbody>`;
+}
+
+const PANELS = [
+  { key: "price", title: "Price", h: 0.24 },
+  { key: "oi", title: "Open interest (coin units)", h: 0.10 },
+  { key: "cvd", title: "Perp CVD (coin units)", h: 0.10 },
+  { key: "spot", title: "Spot CVD (coin units)", h: 0.08 },
+  { key: "fund", title: "Funding and premium (8h, %)", h: 0.10 },
+  { key: "watch", title: "Watchlist notional (USD)", h: 0.12 },
+  { key: "flow", title: "Watchlist net flow, same wallets, cumulative (USD)", h: 0.10 },
+  { key: "liq", title: "Liquidations per bar (USD, partial)", h: 0.08 },
+];
+
+function renderChart(c, t) {
+  const ink2 = css("--ink-2"), muted = css("--muted"), grid = css("--grid"), axis = css("--axis");
+  const buy = css("--buy"), sell = css("--sell"), perp = css("--perp"), spotC = css("--spot"), prem = css("--premium");
+  const gap = 0.028, n = PANELS.length;
+  const layout = {
+    paper_bgcolor: css("--surface"), plot_bgcolor: css("--surface"),
+    font: { family: "system-ui, -apple-system, Segoe UI, sans-serif", size: 12, color: ink2 },
+    margin: { l: 72, r: 16, t: 8, b: 36 }, showlegend: true,
+    legend: { orientation: "h", y: 1.0, yanchor: "bottom", x: 0, font: { color: ink2 } },
+    hovermode: "x unified", hoversubplots: "axis", dragmode: "zoom",
+    hoverlabel: { bgcolor: css("--surface"), bordercolor: axis, font: { color: css("--ink") } },
+    xaxis: { type: "date", gridcolor: grid, linecolor: axis, tickcolor: axis, showspikes: true,
+             spikemode: "across", spikecolor: muted, spikethickness: 1, rangeslider: { visible: false },
+             title: { text: "UTC", font: { color: muted, size: 11 } } },
+    annotations: [],
+  };
+  const hasData = {
+    price: t.c.some(isNum), oi: t.oi.some(isNum), cvd: t.cvd.some(isNum), spot: t.spot_cvd.some(isNum),
+    fund: t.funding_8h.some(isNum) || t.premium.some(isNum), watch: t.watch_long.some(isNum),
+    flow: t.watch_flow.some(isNum), liq: t.liq_long.some(v => v > 0) || t.liq_short.some(v => v > 0),
+  };
+  let top = 1.0;
+  PANELS.forEach((p, i) => {
+    const bottom = Math.max(0, top - p.h * (1 - gap * (n - 1)) / PANELS.reduce((a, q) => a + q.h, 0) * 1);
+    const ax = i === 0 ? "yaxis" : `yaxis${i + 1}`;
+    layout[ax] = { domain: [bottom, top], gridcolor: grid, zerolinecolor: axis, linecolor: axis,
+                   tickfont: { color: muted }, automargin: true, fixedrange: false };
+    layout.annotations.push({ text: p.title, xref: "paper", yref: "paper", x: 0, y: top, xanchor: "left",
+                              yanchor: "top", showarrow: false, font: { size: 12, color: ink2 } });
+    if (!hasData[p.key]) {
+      layout.annotations.push({ text: "no data in this window", xref: "paper", yref: "paper", x: 0.5,
+        y: (top + bottom) / 2, showarrow: false, font: { size: 12, color: muted } });
+    }
+    p.y = i === 0 ? "y" : `y${i + 1}`;
+    top = bottom - gap;
+  });
+  const Y = Object.fromEntries(PANELS.map(p => [p.key, p.y]));
+  layout.xaxis.anchor = PANELS[PANELS.length - 1].y;  // time axis under the bottom panel
+  const x = t.ts;
+  // A point with no neighbour draws no line segment, so give isolated points a dot.
+  const isolated = (y) => y.map((v, i) => isNum(v) && !isNum(y[i - 1]) && !isNum(y[i + 1]) ? 8 : 0);
+  const line = (y, name, color, extra = {}) => ({ type: "scatter", mode: "lines+markers", x, y, name,
+    yaxis: extra.yaxis, line: { color, width: 2 }, marker: { color, size: isolated(y) },
+    connectgaps: false, hovertemplate: "%{y:,.2f}", ...extra });
+  const traces = [
+    { type: "candlestick", x, open: t.o, high: t.h, low: t.l, close: t.c, name: "price", yaxis: Y.price,
+      increasing: { line: { color: buy, width: 1 }, fillcolor: buy }, decreasing: { line: { color: sell, width: 1 }, fillcolor: sell },
+      showlegend: false },
+    line(t.oi, "open interest", perp, { yaxis: Y.oi, showlegend: false, hovertemplate: "%{y:,.0f}" }),
+    line(t.cvd, "perp CVD", perp, { yaxis: Y.cvd }),
+    line(t.spot_cvd, "spot CVD", spotC, { yaxis: Y.spot }),
+    line(t.funding_8h, "funding (8h eq.)", perp, { yaxis: Y.fund, hovertemplate: "%{y:.4f}%" }),
+    line(t.premium, "premium (8h)", prem, { yaxis: Y.fund, hovertemplate: "%{y:.4f}%" }),
+    line(t.watch_long, "watchlist long", buy, { yaxis: Y.watch, hovertemplate: "%{y:$,.3s}" }),
+    line(t.watch_short, "watchlist short", sell, { yaxis: Y.watch, hovertemplate: "%{y:$,.3s}" }),
+    line(t.watch_flow, "net flow", perp, { yaxis: Y.flow, showlegend: false, hovertemplate: "%{y:$,.3s}" }),
+    { type: "bar", x, y: t.liq_long, name: "longs liquidated", yaxis: Y.liq, marker: { color: buy },
+      hovertemplate: "%{y:$,.3s}" },
+    { type: "bar", x, y: t.liq_short, name: "shorts liquidated", yaxis: Y.liq, marker: { color: sell },
+      hovertemplate: "%{y:$,.3s}" },
+  ];
+  layout.barmode = "group"; layout.bargap = 0.25; layout.bargroupgap = 0.1;
+  Plotly.react("chart", traces, layout, { responsive: true, displaylogo: false,
+    modeBarButtonsToRemove: ["select2d", "lasso2d", "autoScale2d"] });
+}
+
+function renderLiqmap(c) {
+  const el = document.getElementById("liqmap"), note = document.getElementById("liqnote");
+  const m = c.liqmap, p = c.positioning;
+  if (!m) { Plotly.purge(el); el.innerHTML = '<p class="dim">No positioning snapshot with a mark price yet.</p>'; note.textContent = ""; return; }
+  const buy = css("--buy"), sell = css("--sell"), grid = css("--grid"), axis = css("--axis"), ink2 = css("--ink-2"), muted = css("--muted");
+  const traces = [
+    { type: "bar", orientation: "h", y: m.px, x: m.long, name: "longs liquidated below", marker: { color: buy },
+      customdata: m.n_long, hovertemplate: "%{y:,.6g}: %{x:$,.3s} (%{customdata} positions)<extra></extra>" },
+    { type: "bar", orientation: "h", y: m.px, x: m.short, name: "shorts liquidated above", marker: { color: sell },
+      customdata: m.n_short, hovertemplate: "%{y:,.6g}: %{x:$,.3s} (%{customdata} positions)<extra></extra>" },
+  ];
+  const layout = {
+    paper_bgcolor: css("--surface"), plot_bgcolor: css("--surface"), barmode: "overlay", bargap: 0.15,
+    font: { family: "system-ui, -apple-system, Segoe UI, sans-serif", size: 12, color: ink2 },
+    margin: { l: 64, r: 12, t: 8, b: 36 }, hovermode: "closest",
+    legend: { orientation: "h", y: 1.0, yanchor: "bottom", x: 0 },
+    xaxis: { gridcolor: grid, linecolor: axis, tickfont: { color: muted }, title: { text: "notional (USD)", font: { size: 11, color: muted } } },
+    yaxis: { gridcolor: grid, linecolor: axis, tickfont: { color: muted }, title: { text: "liquidation price", font: { size: 11, color: muted } } },
+    shapes: [{ type: "line", xref: "paper", x0: 0, x1: 1, y0: m.mark, y1: m.mark, line: { color: css("--ink"), width: 1 } }],
+    annotations: [{ xref: "paper", x: 1, y: m.mark, xanchor: "right", yanchor: "bottom", showarrow: false,
+                    text: `mark ${num(m.mark, 6)}`, font: { size: 11, color: css("--ink") } }],
+  };
+  Plotly.react(el, traces, layout, { responsive: true, displaylogo: false });
+  note.textContent = p ? `Snapshot ${p.snapshot} UTC. Coverage: long ${covPct(p.long_cov)}, short ${covPct(p.short_cov)} of open interest. ` +
+    `${usd(p.no_liq_ntl)} of positions have no liquidation price. Cross-margin liquidation prices move with the account.` : "";
+}
+
+function renderTable(t) {
+  const cols = [["time (UTC)", i => t.ts[i]], ["close", i => num(t.c[i], 6)], ["delta", i => num(t.delta[i])],
+    ["perp CVD", i => num(t.cvd[i])], ["spot CVD", i => num(t.spot_cvd[i])], ["OI", i => num(t.oi[i], 0)],
+    ["funding 8h", i => pct(t.funding_8h[i], 4)], ["premium", i => pct(t.premium[i], 4)],
+    ["watch long", i => usd(t.watch_long[i])], ["watch short", i => usd(t.watch_short[i])],
+    ["net flow", i => usd(t.watch_flow[i])], ["liq L", i => usd(t.liq_long[i])], ["liq S", i => usd(t.liq_short[i])]];
+  const idx = [...t.ts.keys()].reverse();
+  document.getElementById("tableview").innerHTML = `<table><thead><tr>${cols.map(c => `<th scope="col">${c[0]}</th>`).join("")}</tr></thead>` +
+    `<tbody>${idx.map(i => `<tr>${cols.map(c => `<td>${c[1](i)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+}
+
+function render() {
+  history.replaceState(null, "", `#coin=${state.coin}&tf=${state.tf}&view=${state.view}`);
+  renderFilters();
+  const c = DATA.coins[state.coin], t = c.tfs[state.tf];
+  document.getElementById("meta").textContent = `generated ${DATA.generated} UTC · ${DATA.recorder} · ${DATA.coverage_note}`;
+  document.getElementById("charttitle").textContent = `${state.coin} · ${state.tf} bars (${t.ts.length})`;
+  renderTiles(c, t); renderFlowTable(c);
+  const charts = state.view === "charts";
+  document.getElementById("chart").hidden = !charts;
+  document.getElementById("tableview").hidden = charts;
+  if (charts) renderChart(c, t); else renderTable(t);
+  renderLiqmap(c);
+}
+
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
+render();
+</script>
+</body>
+</html>

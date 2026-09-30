@@ -280,3 +280,78 @@ def positioning_series(
               "long_cov": pl.Float64, "short_cov": pl.Float64, "combined_cov": pl.Float64,
               "lev_long": pl.Float64, "lev_short": pl.Float64}  # fmt: skip
     return pl.DataFrame(out, schema=schema)
+
+
+def all_rounds(conn: sqlite3.Connection) -> list[int]:
+    return [int(r[0]) for r in conn.execute("SELECT round_ts FROM snapshot_rounds ORDER BY 1")]
+
+
+def positions_by_round(
+    conn: sqlite3.Connection, coin: str, rounds: list[int], data_dir: str | None = None
+) -> dict[int, dict[str, tuple[float, float]]]:
+    """{round: {address: (szi, position_value)}} for many rounds in one pass."""
+    out: dict[int, dict[str, tuple[float, float]]] = {r: {} for r in rounds}
+    for i in range(0, len(rounds), 500):
+        chunk = rounds[i : i + 500]
+        marks = ",".join("?" * len(chunk))
+        for r in conn.execute(
+            f"SELECT round_ts, address, szi, position_value FROM positions"
+            f" WHERE coin = ? AND round_ts IN ({marks})",
+            (coin, *chunk),
+        ):
+            out[r[0]][r[1]] = (r[2], r[3])
+    if data_dir is not None:
+        for r in rounds:
+            if not out[r]:
+                df = round_positions(conn, r, coin, data_dir)
+                out[r] = {
+                    a: (s, v)
+                    for a, s, v in zip(df["address"], df["szi"], df["position_value"], strict=True)
+                }
+    return out
+
+
+def flow_series(
+    conn: sqlite3.Connection,
+    coin: str,
+    rounds: list[int | None],
+    w: WalletsConfig,
+    data_dir: str | None = None,
+) -> list[dict[str, float | int | None]]:
+    """Per bar (given the snapshot round at each bar's close, or None): watchlist long and
+    short notional, and the same-wallet net change in coin units since the previous
+    bar's round (only wallets watched and polled OK in both rounds, none excluded)."""
+    known = sorted({r for r in rounds if r is not None})
+    snap = positions_by_round(conn, coin, known, data_dir)
+    events = ws.load_events(conn)
+    excluded = excluded_addresses(conn, w)
+    failed: dict[int, set[str]] = {}
+    for r in conn.execute("SELECT round_ts, address FROM round_failures"):
+        failed.setdefault(r[0], set()).add(r[1])
+
+    def members(r: int) -> set[str]:
+        return ws.active_at(events, r) - excluded - failed.get(r, set())
+
+    out: list[dict[str, float | int | None]] = []
+    prev: int | None = None
+    for r in rounds:
+        row: dict[str, float | int | None] = {
+            "long_ntl": None, "short_ntl": None, "n_long": None, "n_short": None,
+            "net_change": None,
+        }  # fmt: skip
+        if r is not None:
+            pos = {a: v for a, v in snap[r].items() if a not in excluded}
+            row["long_ntl"] = sum(v for s, v in pos.values() if s > 0)
+            row["short_ntl"] = sum(v for s, v in pos.values() if s < 0)
+            row["n_long"] = sum(1 for s, _ in pos.values() if s > 0)
+            row["n_short"] = sum(1 for s, _ in pos.values() if s < 0)
+            if prev is not None and prev != r:
+                both = members(prev) & members(r)
+                if both:
+                    row["net_change"] = sum(
+                        snap[r].get(a, (0.0, 0.0))[0] - snap[prev].get(a, (0.0, 0.0))[0]
+                        for a in both
+                    )
+            prev = r
+        out.append(row)
+    return out

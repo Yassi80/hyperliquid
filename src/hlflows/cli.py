@@ -357,3 +357,28 @@ def backup(dest: Annotated[Path, typer.Argument(help="Destination .sqlite file")
     conn = db.connect(cfg.storage.db_path)
     path = maintenance.backup(conn, dest)
     console.print(f"backed up to {path} ({path.stat().st_size / 1e6:,.1f} MB)")
+
+
+@app.command()
+def dashboard(
+    coin: Annotated[str | None, typer.Option(help="Coin(s), comma-separated; default all")] = None,
+    tf: Annotated[str, typer.Option(help="Timeframes to include")] = "15m,1h,4h,1d",
+    bars: Annotated[int, typer.Option(help="Bars per timeframe")] = 200,
+    out: Annotated[Path | None, typer.Option(help="Output .html file")] = None,
+    open_: Annotated[bool, typer.Option("--open", help="Open it in the browser")] = False,
+) -> None:
+    """Write a self-contained HTML dashboard of the flows data (charts, tables, liq map)."""
+    import webbrowser
+
+    from hlflows import dashboard as dash
+
+    cfg = _config()
+    coins = _coins(cfg, coin)
+    conn = db.connect(cfg.storage.db_path)
+    payload = dash.build(cfg, conn, coins, parse_timeframes(tf), bars)
+    path = out or Path(cfg.storage.data_dir) / "dashboard.html"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(dash.render_html(payload))
+    console.print(f"wrote {path}")
+    if open_:
+        webbrowser.open(path.resolve().as_uri())
