@@ -1,0 +1,15 @@
+[Unit]
+Description=hlflows: rebuild the HTML dashboard served by Caddy
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=hlflows
+Group=hlflows
+Environment=HLFLOWS_CONFIG=/etc/hlflows/hlflows.toml
+ExecStart=/opt/hlflows-runtime/venv/bin/hlflows dashboard --out /var/lib/hlflows-www/index.html
+# Lower priority than the recorder; capped so a slow build can't crowd it out.
+Nice=15
+CPUWeight=20
+MemoryMax=500M
+TimeoutStartSec=240

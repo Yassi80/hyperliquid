@@ -68,9 +68,20 @@
   th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
   .dim { color: var(--muted); }
   .grid2 { display: grid; grid-template-columns: minmax(0, 3fr) minmax(280px, 1fr); gap: 16px; }
-  @media (max-width: 1000px) { .grid2 { grid-template-columns: 1fr; } }
+  .grid2 > *, .tiles > * { min-width: 0; }  /* let wide tables scroll instead of widening the page */
+  .filters > span { display: inline-flex; align-items: center; flex-wrap: wrap; }
+  @media (max-width: 1000px) { .grid2 { grid-template-columns: minmax(0, 1fr); } }
   #chart { width: 100%; height: 1180px; }
   #liqmap { width: 100%; height: 640px; }
+  .stale { color: var(--ink); font-weight: 600; }
+  @media (max-width: 640px) {
+    .wrap { padding: 12px 10px 32px; }
+    .card, .tile { padding: 10px; }
+    .filters { gap: 8px 12px; }
+    .seg button { padding: 6px 10px; }
+    #chart { height: 1100px; }
+    #liqmap { height: 520px; }
+  }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -78,7 +89,7 @@
 <div class="wrap">
   <header>
     <h1>Hyperliquid flows</h1>
-    <span class="meta" id="meta"></span>
+    <span class="meta"><span id="age"></span> · <span id="meta"></span></span>
   </header>
 
   <div class="filters" role="toolbar" aria-label="Filters">
@@ -125,6 +136,10 @@ for (const [k, v] of new URLSearchParams(location.hash.slice(1))) {
   if (k === "tf" && DATA.tfs.includes(v)) state.tf = v;
   if (k === "view" && ["charts", "table"].includes(v)) state.view = v;
 }
+
+// Phones and tablets: tap shows values; drag-to-zoom would trap page scrolling.
+const TOUCH = window.matchMedia("(pointer: coarse)").matches;
+const NARROW = () => window.innerWidth < 640;
 
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const isNum = (v) => typeof v === "number" && isFinite(v);
@@ -222,9 +237,9 @@ function renderChart(c, t) {
   const layout = {
     paper_bgcolor: css("--surface"), plot_bgcolor: css("--surface"),
     font: { family: "system-ui, -apple-system, Segoe UI, sans-serif", size: 12, color: ink2 },
-    margin: { l: 72, r: 16, t: 8, b: 36 }, showlegend: true,
-    legend: { orientation: "h", y: 1.0, yanchor: "bottom", x: 0, font: { color: ink2 } },
-    hovermode: "x unified", hoversubplots: "axis", dragmode: "zoom",
+    margin: NARROW() ? { l: 48, r: 6, t: 8, b: 32 } : { l: 72, r: 16, t: 8, b: 36 }, showlegend: true,
+    legend: { orientation: "h", y: 1.0, yanchor: "bottom", x: 0, font: { color: ink2, size: NARROW() ? 10 : 12 } },
+    hovermode: "x unified", hoversubplots: "axis", dragmode: TOUCH ? false : "zoom",
     hoverlabel: { bgcolor: css("--surface"), bordercolor: axis, font: { color: css("--ink") } },
     xaxis: { type: "date", gridcolor: grid, linecolor: axis, tickcolor: axis, showspikes: true,
              spikemode: "across", spikecolor: muted, spikethickness: 1, rangeslider: { visible: false },
@@ -279,8 +294,8 @@ function renderChart(c, t) {
       hovertemplate: "%{y:$,.3s}" },
   ];
   layout.barmode = "group"; layout.bargap = 0.25; layout.bargroupgap = 0.1;
-  Plotly.react("chart", traces, layout, { responsive: true, displaylogo: false,
-    modeBarButtonsToRemove: ["select2d", "lasso2d", "autoScale2d"] });
+  Plotly.react("chart", traces, layout, { responsive: true, displaylogo: false, scrollZoom: false,
+    displayModeBar: !TOUCH, modeBarButtonsToRemove: ["select2d", "lasso2d", "autoScale2d"] });
 }
 
 function renderLiqmap(c) {
@@ -297,7 +312,8 @@ function renderLiqmap(c) {
   const layout = {
     paper_bgcolor: css("--surface"), plot_bgcolor: css("--surface"), barmode: "overlay", bargap: 0.15,
     font: { family: "system-ui, -apple-system, Segoe UI, sans-serif", size: 12, color: ink2 },
-    margin: { l: 64, r: 12, t: 8, b: 36 }, hovermode: "closest",
+    margin: NARROW() ? { l: 52, r: 6, t: 8, b: 32 } : { l: 64, r: 12, t: 8, b: 36 }, hovermode: "closest",
+    dragmode: TOUCH ? false : "zoom",
     legend: { orientation: "h", y: 1.0, yanchor: "bottom", x: 0 },
     xaxis: { gridcolor: grid, linecolor: axis, tickfont: { color: muted }, title: { text: "notional (USD)", font: { size: 11, color: muted } } },
     yaxis: { gridcolor: grid, linecolor: axis, tickfont: { color: muted }, title: { text: "liquidation price", font: { size: 11, color: muted } } },
@@ -305,7 +321,8 @@ function renderLiqmap(c) {
     annotations: [{ xref: "paper", x: 1, y: m.mark, xanchor: "right", yanchor: "bottom", showarrow: false,
                     text: `mark ${num(m.mark, 6)}`, font: { size: 11, color: css("--ink") } }],
   };
-  Plotly.react(el, traces, layout, { responsive: true, displaylogo: false });
+  Plotly.react(el, traces, layout, { responsive: true, displaylogo: false, scrollZoom: false,
+    displayModeBar: !TOUCH });
   note.textContent = p ? `Snapshot ${p.snapshot} UTC. Coverage: long ${covPct(p.long_cov)}, short ${covPct(p.short_cov)} of open interest. ` +
     `${usd(p.no_liq_ntl)} of positions have no liquidation price. Cross-margin liquidation prices move with the account.` : "";
 }
@@ -336,8 +353,26 @@ function render() {
   renderLiqmap(c);
 }
 
+// Freshness: the VM rebuilds the page every few minutes. Show its age, flag it when stale,
+// and reload (keeping coin / timeframe / view in the URL) once a newer build is due.
+const REFRESH_MS = 5 * 60 * 1000, STALE_MS = 15 * 60 * 1000;
+function showAge() {
+  const age = Date.now() - DATA.generated_ms, mins = Math.floor(age / 60000);
+  const el = document.getElementById("age");
+  const txt = mins < 1 ? "updated just now" : `updated ${mins} min ago`;
+  el.textContent = age > STALE_MS ? `⚠ ${txt}: data may be stale (dashboard timer or recorder down?)` : txt;
+  el.className = age > STALE_MS ? "stale" : "";
+}
+function maybeReload() {
+  if (document.visibilityState === "visible" && Date.now() - DATA.generated_ms > REFRESH_MS + 30000
+      && location.protocol.startsWith("http")) location.reload();
+}
+setInterval(() => { showAge(); maybeReload(); }, 30000);
+document.addEventListener("visibilitychange", maybeReload);
+
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
 render();
+showAge();
 </script>
 </body>
 </html>

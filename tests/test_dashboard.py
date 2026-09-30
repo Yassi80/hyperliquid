@@ -72,3 +72,17 @@ def test_clean_replaces_non_finite() -> None:
         "b": [2.0],
     }
     assert datetime.now(UTC) and to_ms(datetime(2026, 1, 1, tzinfo=UTC)) > 0
+
+
+def test_empty_timeframe_has_every_series(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    cfg = Config(storage=StorageConfig(db_path=":memory:", data_dir=str(tmp_path)))
+    t = dash.build_timeframe(cfg, conn, "BTC", TIMEFRAMES["15m"], 10)
+    assert set(t) == set(dash.SERIES_KEYS) and all(v == [] for v in t.values())
+
+
+def test_series_keys_match_a_full_build(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    with store.transaction(conn):
+        _seed(conn)
+    cfg = Config(storage=StorageConfig(db_path=":memory:", data_dir=str(tmp_path)))
+    t = dash.build_timeframe(cfg, conn, "BTC", TIMEFRAMES["1h"], 8)
+    assert set(t) == set(dash.SERIES_KEYS)

@@ -27,6 +27,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sqlite3 curl ca-certificat
 echo "== user and directories"
 id hlflows >/dev/null 2>&1 || useradd --system --home-dir "$DATA" --shell /usr/sbin/nologin hlflows
 install -d -o hlflows -g hlflows "$DATA" "$DATA/backup" "$DATA/.gcloud" "$RUNTIME" /var/cache/hlflows
+install -d -m 755 -o hlflows -g hlflows /var/lib/hlflows-www   # dashboard page, served by Caddy
 install -d -o root -g root "$CONF"
 chown -R hlflows:hlflows "$APP"
 
@@ -70,9 +71,10 @@ echo "== systemd units"
 install -m 644 "$APP"/deploy/gcp/systemd/*.service "$APP"/deploy/gcp/systemd/*.timer /etc/systemd/system/
 install -m 755 "$APP/deploy/gcp/sync.sh" "$APP/deploy/gcp/backup.sh" "$RUNTIME/"
 systemctl daemon-reload
-systemctl enable --now hlflows-sync.timer hlflows-backup.timer
+systemctl enable --now hlflows-sync.timer hlflows-backup.timer hlflows-dashboard.timer
 systemctl enable hlflows-recorder.service
 systemctl restart hlflows-recorder.service
+systemctl start --no-block hlflows-dashboard.service   # first build now, then every 5 min
 
 echo "== done"
 systemctl --no-pager --lines=5 status hlflows-recorder.service || true

@@ -140,6 +140,7 @@ What runs on the VM:
 |---|---|---|
 | `hlflows-recorder.service` | always (restarts on failure) | `hlflows record` |
 | `hlflows-sync.timer` | hourly at :10 | archive positions older than 14 days to Parquet → `gcloud storage rsync` trades and positions to the bucket → delete local Parquet older than 30 days |
+| `hlflows-dashboard.timer` | every 5 min | rebuild the dashboard page served by Caddy (if set up, see below) |
 | `hlflows-backup.timer` | daily 01:30 UTC | online SQLite backup → gzip → `gs://BUCKET/backups/hlflows-DATE.sqlite.gz` and `latest.sqlite.gz` (dated copies deleted after 14 days) |
 
 Layout on the VM: code in `/opt/hlflows`, Python and virtualenv in `/opt/hlflows-runtime`,
@@ -248,6 +249,51 @@ HLFLOWS_CONFIG=~/hlflows-data/hlflows.toml uv run hlflows show --coin ETH
 
 The database copy is the latest nightly backup (up to a day old); query the VM for live
 views. Raw trades and archived positions sync incrementally.
+
+### 5. Dashboard on your phone (HTTPS + password)
+
+The VM rebuilds the dashboard every 5 minutes (`hlflows-dashboard.timer`, low priority,
+capped at 500 MB) into `/var/lib/hlflows-www/index.html`. Caddy serves it over HTTPS
+with a Let's Encrypt certificate and a username/password. The page reloads itself when a
+newer build is due, keeps your coin/timeframe/view in the URL, and warns when it's stale.
+
+One-time setup:
+
+1. **A hostname.** Sign in at [duckdns.org](https://www.duckdns.org), create a subdomain
+   (e.g. `yourname`) and set its IP to the VM's external IP. (DuckDNS is on the Public
+   Suffix List, so Let's Encrypt issues its certificates reliably; sslip.io/nip.io are not.)
+2. **Keep the IP and open ports 80/443** (80 is for certificate issuance and the redirect):
+
+   ```sh
+   source deploy/gcp/gcp.env
+   IP=$(gcloud compute instances describe "$VM" --zone="$ZONE" \
+        --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
+   gcloud compute addresses create hlflows-ip --addresses="$IP" --region="$REGION"
+   gcloud compute firewall-rules create allow-hlflows-web --network=default \
+     --allow=tcp:80,tcp:443 --target-tags=hlflows-web --source-ranges=0.0.0.0/0
+   gcloud compute instances add-tags "$VM" --zone="$ZONE" --tags=hlflows-web
+   ```
+
+   A static address costs the same as the ephemeral one while the VM uses it; it just
+   survives VM stop/start, so the DuckDNS name stays valid.
+3. **Set `WEB_HOST` and `WEB_USER`** in `deploy/gcp/gcp.env`, deploy (`bash
+   deploy/gcp/push.sh`, which installs the dashboard timer), then:
+
+   ```sh
+   bash deploy/gcp/web-setup.sh    # asks for a password (or generates one); installs Caddy
+   ```
+
+   Re-run it any time to change the password. Only a bcrypt hash is stored on the VM.
+4. On your phone open `https://yourname.duckdns.org`, sign in, and "Add to Home screen".
+
+On a phone, charts don't zoom on drag (so the page scrolls normally); tap a chart to see
+every panel's values at that time.
+
+Security: the password travels only over HTTPS. There's no rate limit on login attempts,
+so use a long random password (the generated one is 20 characters). Caddy logs requests
+to `/var/log/caddy/hlflows-access.log` on the VM. The page holds market data and your
+watchlist analysis, no keys or credentials. To take it offline:
+`gcloud compute ssh "$VM" --zone="$ZONE" -- sudo systemctl disable --now caddy`.
 
 ### Disk and cost
 

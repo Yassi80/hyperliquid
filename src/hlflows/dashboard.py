@@ -32,6 +32,12 @@ from hlflows.timeutil import (
 from hlflows.wallets import positioning as pos
 
 DEFAULT_TFS = ("15m", "1h", "4h", "1d")
+# Every per-timeframe series the page reads; an empty timeframe still has them all.
+SERIES_KEYS = (
+    "ts", "closed", "o", "h", "l", "c", "volume", "delta", "taker_cov", "spot_taker_cov",
+    "cvd", "spot_cvd", "oi", "funding_8h", "premium", "watch_long", "watch_short",
+    "watch_flow", "liq_long", "liq_short", "res",
+)  # fmt: skip
 SUMMARY_TFS = ("15m", "1h", "4h", "1d", "1w")
 
 
@@ -75,7 +81,7 @@ def build_timeframe(
     start = _window_start(tf, n_bars, now, ws)
     bars = data.load_bars(conn, coin, tf, start, now, ws)
     if bars.is_empty():
-        return {"ts": []}
+        return {key: [] for key in SERIES_KEYS}
     ts = bars["ts"].to_list()
     spot = data.load_bars(conn, spot_market_id(coin), tf, start, now, ws)
     spot_delta = dict(zip(spot["ts"].to_list(), spot["delta"].to_list(), strict=True))
@@ -191,8 +197,10 @@ def recorder_line(conn: sqlite3.Connection) -> str:
 def build(
     cfg: Config, conn: sqlite3.Connection, coins: list[str], tfs: list[Timeframe], n_bars: int
 ) -> dict[str, Any]:
+    generated = now_ms()
     return {
-        "generated": fmt_ms(now_ms()),
+        "generated": fmt_ms(generated),
+        "generated_ms": generated,
         "recorder": recorder_line(conn),
         "tfs": [tf.name for tf in tfs],
         "coins": {c: build_coin(cfg, conn, c, tfs, n_bars) for c in coins},

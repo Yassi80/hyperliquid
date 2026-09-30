@@ -378,7 +378,10 @@ def dashboard(
     payload = dash.build(cfg, conn, coins, parse_timeframes(tf), bars)
     path = out or Path(cfg.storage.data_dir) / "dashboard.html"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(dash.render_html(payload))
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(dash.render_html(payload))
+    tmp.chmod(0o644)
+    tmp.replace(path)  # atomic: a web server never sees a half-written page
     console.print(f"wrote {path}")
     if open_:
         webbrowser.open(path.resolve().as_uri())
