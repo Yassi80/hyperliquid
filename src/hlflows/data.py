@@ -101,9 +101,14 @@ def load_bars(
     """OHLCV + taker split per `tf` bar for bars opening in [start, end).
 
     Columns: ts, o, h, l, c, volume, n, buy_sz, sell_sz, delta, buy_ntl, sell_ntl,
-    res (stored resolution used), complete (coverage spans the bar), taker (taker split
-    known for the whole bar), closed (bar has ended), quality.
-    Bars with no data at any resolution are omitted.
+    res (stored resolution used for OHLCV), complete (coverage spans the bar),
+    taker_cov (share of the bar with a confirmed taker split, 0-1), taker (taker_cov == 1),
+    closed (bar has ended), quality.
+
+    The taker split always comes from recorded 1m bars, whichever resolution supplies
+    OHLCV. It sums every recorded minute, so a bar missing a minute or two (a reconnect)
+    keeps its delta with `taker_cov` < 1 and quality `taker_partial`; it is None only when
+    no minute in the bar has a taker split. Bars with no data at any resolution are omitted.
     """
     end = now_ms() if end is None else end
     starts = bucket_starts(tf, start, end, week_start)
@@ -140,7 +145,7 @@ def load_bars(
                 pl.col("sell_sz").sum(),
                 pl.col("buy_ntl").sum(),
                 pl.col("sell_ntl").sum(),
-                pl.col("buy_sz").null_count().alias("taker_nulls"),
+                pl.col("buy_sz").is_not_null().sum().alias("taker_rows"),
             )
         )
         per_res[res] = {row["bucket"]: row for row in agg.iter_rows(named=True)}
@@ -171,12 +176,19 @@ def load_bars(
         if chosen is None:
             continue
         row = per_res[chosen][b]
-        taker = chosen == "1m" and row["taker_nulls"] == 0 and cov.contains(taker_cov, span)
+        minute = per_res.get("1m", {}).get(b)
+        has_taker = minute is not None and int(minute["taker_rows"]) > 0  # type: ignore[call-overload]
+        span_ms = span[1] - span[0]
+        uncovered = sum(e - s for s, e in cov.subtract(span, taker_cov))
+        taker_frac = (span_ms - uncovered) / span_ms if has_taker and span_ms > 0 else 0.0
         quality = []
         if not complete:
             quality.append("partial")
+        if has_taker and taker_frac < 1:
+            quality.append("taker_partial")
         if low_sig:
             quality.append("low_significance")
+        split = minute if has_taker else None
         out.append(
             {
                 "ts": b,
@@ -186,13 +198,14 @@ def load_bars(
                 "c": row["c"],
                 "volume": row["volume"],
                 "n": row["n"],
-                "buy_sz": row["buy_sz"] if taker else None,
-                "sell_sz": row["sell_sz"] if taker else None,
-                "buy_ntl": row["buy_ntl"] if taker else None,
-                "sell_ntl": row["sell_ntl"] if taker else None,
+                "buy_sz": split["buy_sz"] if split else None,
+                "sell_sz": split["sell_sz"] if split else None,
+                "buy_ntl": split["buy_ntl"] if split else None,
+                "sell_ntl": split["sell_ntl"] if split else None,
                 "res": chosen,
                 "complete": complete,
-                "taker": taker,
+                "taker_cov": taker_frac if has_taker else None,
+                "taker": has_taker and taker_frac >= 1,
                 "closed": closed,
                 "quality": ",".join(quality) or None,
             }
@@ -210,6 +223,7 @@ _OUT_SCHEMA = {
     **BAR_SCHEMA,
     "res": pl.Utf8,
     "complete": pl.Boolean,
+    "taker_cov": pl.Float64,
     "taker": pl.Boolean,
     "closed": pl.Boolean,
     "quality": pl.Utf8,
@@ -229,6 +243,7 @@ _OUT_COLUMNS = [
     "sell_ntl",
     "res",
     "complete",
+    "taker_cov",
     "taker",
     "closed",
     "quality",

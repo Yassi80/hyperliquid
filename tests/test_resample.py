@@ -71,18 +71,34 @@ def test_4h_bars_align_to_utc_and_flag_partial(conn: sqlite3.Connection) -> None
     df = data.load_bars(conn, "BTC", TIMEFRAMES["4h"], T0, T0 + 8 * HOUR_MS)
     assert df["ts"].to_list() == [T0, T0 + 4 * HOUR_MS]
     assert df["complete"].to_list() == [False, True]
-    assert df["quality"].to_list() == ["partial", None]
+    assert df["quality"].to_list() == ["partial,taker_partial", None]
+    assert df["taker_cov"].to_list() == [pytest.approx(0.5), 1.0]
 
 
-def test_falls_back_to_hourly_candles_without_delta(conn: sqlite3.Connection) -> None:
+def test_falls_back_to_hourly_candles_keeping_partial_delta(conn: sqlite3.Connection) -> None:
     add_bars(conn, "1h", T0, 24, source="candle", taker=False)
-    add_bars(conn, "1m", T0 + 60 * MINUTE_MS, 30)  # 1m covers only part of one hour
+    add_bars(conn, "1m", T0 + 60 * MINUTE_MS, 30)  # 30 recorded minutes inside one 4h bar
     df = data.load_bars(conn, "BTC", TIMEFRAMES["4h"], T0, T0 + DAY_MS)
     assert df.height == 6
-    assert set(df["res"].to_list()) == {"1h"}
+    assert set(df["res"].to_list()) == {"1h"}  # OHLCV from the complete hourly candles
     assert df["complete"].all()
-    assert df["delta"].null_count() == 6
-    assert not df["taker"].any()
+    # The taker split comes from the recorded minutes, labelled as partial.
+    first = df.row(0, named=True)
+    assert first["delta"] == pytest.approx(30 * 0.2)
+    assert first["taker_cov"] == pytest.approx(30 / 240)
+    assert first["quality"] == "taker_partial" and not first["taker"]
+    assert df["delta"].null_count() == 5
+
+
+def test_reconnect_minute_does_not_blank_the_bar(conn: sqlite3.Connection) -> None:
+    """A bar missing one minute (a reconnect) keeps its delta, flagged partial."""
+    add_bars(conn, "1m", T0, 30)
+    add_bars(conn, "1m", T0 + 31 * MINUTE_MS, 29)  # minute 30 was lost
+    df = data.load_bars(conn, "BTC", TIMEFRAMES["1h"], T0, T0 + HOUR_MS)
+    row = df.row(0, named=True)
+    assert row["delta"] == pytest.approx(59 * 0.2)
+    assert row["taker_cov"] == pytest.approx(59 / 60)
+    assert "taker_partial" in row["quality"] and not row["taker"]
 
 
 def test_prefers_finest_complete_resolution(conn: sqlite3.Connection) -> None:

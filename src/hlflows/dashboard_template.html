@@ -92,7 +92,8 @@
   <div class="card">
     <h2>Last closed bar per timeframe</h2>
     <div class="scroll"><table id="flowtable"></table></div>
-    <p class="note">▲/▼ show direction. Delta and CVD exist only while the recorder was live; "—" means no data for that bar.
+    <p class="note">▲/▼ show direction. Delta and CVD exist only while the recorder was live; "—" means no data for that bar;
+      ≈ marks a delta missing some minutes of the bar (e.g. a reconnect).
       Watch Δnet = change in the watchlist's net position over the bar (same wallets at both ends, USD at close).
       Liquidations are partial (watched wallets + backstops).</p>
   </div>
@@ -103,7 +104,8 @@
       <div id="chart" role="img" aria-label="Stacked flow charts"></div>
       <div id="tableview" hidden class="scroll"></div>
       <p class="note">Each panel has its own scale. Blue = buy / long / up, red = sell / short / down.
-        CVD is anchored at the left edge of the window; breaks in a line are periods without data, after which the sum resumes.
+        CVD is anchored at the left edge of the window. A bar missing a few minutes of taker data (a reconnect) still counts, and its hover
+        says how much of the bar was covered; breaks in a line are bars with no taker data at all, after which the sum resumes.
         Watchlist notional also moves as wallets join or leave the watchlist; the net-flow panel counts only wallets present at both ends of each bar.</p>
     </div>
     <div class="card">
@@ -136,6 +138,8 @@ const num = (v, d = 2) => isNum(v) ? v.toLocaleString(undefined, { maximumFracti
 const pct = (v, d = 2) => isNum(v) ? (v > 0 ? "+" : "") + v.toFixed(d) + "%" : "—";
 const arrow = (v) => !isNum(v) || v === 0 ? "" : (v > 0 ? "▲ " : "▼ ");
 const covPct = (v) => isNum(v) ? (v * 100).toFixed(1) + "%" : "—";
+// Hover suffix for bars whose taker split is missing some minutes.
+const covLabel = (v) => isNum(v) && v < 0.9995 ? ` (taker split ${(v * 100).toFixed(0)}% of bar)` : "";
 
 function segmented(el, items, current, onPick) {
   el.innerHTML = "";
@@ -189,7 +193,8 @@ function renderFlowTable(c) {
     "funding 8h", "premium 8h", "watch Δnet", "liqs L / S", "src"];
   const rows = c.summary.map(r => [
     r.tf, r.bar || "—", num(r.close, 6), arrow(r.price_chg_pct) + pct(r.price_chg_pct), arrow(r.oi_chg_pct) + pct(r.oi_chg_pct),
-    arrow(r.delta) + num(r.delta), num(r.cvd_slope), num(r.spot_delta),
+    arrow(r.delta) + (isNum(r.taker_cov) && r.taker_cov < 0.9995 ? "≈" : "") + num(r.delta), num(r.cvd_slope),
+    (isNum(r.spot_taker_cov) && r.spot_taker_cov < 0.9995 ? "≈" : "") + num(r.spot_delta),
     pct(isNum(r.funding_8h) ? r.funding_8h * 100 : null, 4), pct(isNum(r.premium) ? r.premium * 100 : null, 4),
     arrow(r.watch_dnet_usd) + usd(r.watch_dnet_usd), (r.liq_long || r.liq_short) ? `${usd(r.liq_long)} / ${usd(r.liq_short)}` : "—",
     (r.source_res || "—") + (r.complete || !r.source_res ? "" : " partial"),
@@ -259,8 +264,10 @@ function renderChart(c, t) {
       increasing: { line: { color: buy, width: 1 }, fillcolor: buy }, decreasing: { line: { color: sell, width: 1 }, fillcolor: sell },
       showlegend: false },
     line(t.oi, "open interest", perp, { yaxis: Y.oi, showlegend: false, hovertemplate: "%{y:,.0f}" }),
-    line(t.cvd, "perp CVD", perp, { yaxis: Y.cvd }),
-    line(t.spot_cvd, "spot CVD", spotC, { yaxis: Y.spot }),
+    line(t.cvd, "perp CVD", perp, { yaxis: Y.cvd, customdata: t.taker_cov.map(covLabel),
+      hovertemplate: "%{y:,.2f}%{customdata}" }),
+    line(t.spot_cvd, "spot CVD", spotC, { yaxis: Y.spot, customdata: t.spot_taker_cov.map(covLabel),
+      hovertemplate: "%{y:,.2f}%{customdata}" }),
     line(t.funding_8h, "funding (8h eq.)", perp, { yaxis: Y.fund, hovertemplate: "%{y:.4f}%" }),
     line(t.premium, "premium (8h)", prem, { yaxis: Y.fund, hovertemplate: "%{y:.4f}%" }),
     line(t.watch_long, "watchlist long", buy, { yaxis: Y.watch, hovertemplate: "%{y:$,.3s}" }),
@@ -305,6 +312,7 @@ function renderLiqmap(c) {
 
 function renderTable(t) {
   const cols = [["time (UTC)", i => t.ts[i]], ["close", i => num(t.c[i], 6)], ["delta", i => num(t.delta[i])],
+    ["taker cov.", i => covPct(t.taker_cov[i])],
     ["perp CVD", i => num(t.cvd[i])], ["spot CVD", i => num(t.spot_cvd[i])], ["OI", i => num(t.oi[i], 0)],
     ["funding 8h", i => pct(t.funding_8h[i], 4)], ["premium", i => pct(t.premium[i], 4)],
     ["watch long", i => usd(t.watch_long[i])], ["watch short", i => usd(t.watch_short[i])],

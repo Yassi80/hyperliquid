@@ -34,9 +34,11 @@ class TfRow:
     oi_close: float | None = None
     oi_chg_pct: float | None = None
     delta: float | None = None
+    taker_cov: float | None = None  # share of the bar with a confirmed taker split
     cvd_slope: float | None = None
     spot_delta: float | None = None
     spot_quality: str | None = None
+    spot_taker_cov: float | None = None
     funding_1h: float | None = None
     funding_8h: float | None = None
     premium: float | None = None
@@ -85,6 +87,7 @@ def build_row(cfg: Config, conn: sqlite3.Connection, coin: str, tf: Timeframe) -
     spot_last = spot.filter(pl.col("ts") == last["ts"])
     spot_delta = spot_last["delta"][0] if not spot_last.is_empty() else None
     spot_quality = spot_last["quality"][0] if not spot_last.is_empty() else None
+    spot_taker_cov = spot_last["taker_cov"][0] if not spot_last.is_empty() else None
 
     bar_end = next_bucket_start(last["ts"], tf)
     liqs = pos.load_liquidations(conn, coin, last["ts"], bar_end)
@@ -116,9 +119,11 @@ def build_row(cfg: Config, conn: sqlite3.Connection, coin: str, tf: Timeframe) -
         oi_close=oi_last,
         oi_chg_pct=pct_change(oi_prev, oi_last),
         delta=last["delta"],
+        taker_cov=last["taker_cov"],
         cvd_slope=cvd_slope(window["delta"].to_list(), volumes),
         spot_delta=spot_delta,
         spot_quality=spot_quality,
+        spot_taker_cov=spot_taker_cov,
         funding_1h=f.get("rate_1h"),
         funding_8h=f.get("rate_8h"),
         premium=f.get("premium"),
@@ -162,7 +167,8 @@ def render(
         table.add_column(col, justify="right" if col not in ("tf", "bar open", "src") else "left")
     rows = [build_row(cfg, conn, coin, tf) for tf in tfs]
     for r in rows:
-        spot = _num(r.spot_delta, ",.2f")
+        partial_spot = r.spot_taker_cov is not None and r.spot_taker_cov < 1
+        spot = ("≈" if partial_spot else "") + _num(r.spot_delta, ",.2f")
         if r.spot_delta is not None and r.spot_quality and "low_significance" in r.spot_quality:
             spot += " (low sig.)"
         table.add_row(
@@ -172,7 +178,7 @@ def render(
             _pct(r.price_chg_pct),
             _num(r.oi_close, ",.0f"),
             _pct(r.oi_chg_pct),
-            _num(r.delta, ",.2f"),
+            ("≈" if r.taker_cov is not None and r.taker_cov < 1 else "") + _num(r.delta, ",.2f"),
             _num(r.cvd_slope, "+.2f"),
             spot,
             _pct(r.funding_1h, 5, 100),
@@ -250,7 +256,8 @@ def render(
     parts.append(
         Text(
             "delta/CVD exist only for minutes the recorder was live (bars from candles have "
-            "none); OI change needs recorded context. Premium is the 8h-scale index; funding "
+            "none); ≈ marks a bar whose taker split is missing some minutes (e.g. a reconnect). "
+            "OI change needs recorded context. Premium is the 8h-scale index; funding "
             "pins at +0.00125%/h when it is between -0.04% and +0.06%. watch Δnet: change in "
             "the watchlist's net position over the bar (same wallets at both ends, USD at "
             "close). liqs: liquidations seen (watched wallets + backstop), partial.",

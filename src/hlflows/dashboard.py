@@ -79,6 +79,7 @@ def build_timeframe(
     ts = bars["ts"].to_list()
     spot = data.load_bars(conn, spot_market_id(coin), tf, start, now, ws)
     spot_delta = dict(zip(spot["ts"].to_list(), spot["delta"].to_list(), strict=True))
+    spot_cov = dict(zip(spot["ts"].to_list(), spot["taker_cov"].to_list(), strict=True))
     ctx = data.load_ctx(conn, coin, tf, start, now, ws)
     oi = dict(zip(ctx["ts"].to_list(), ctx["oi_close"].to_list(), strict=True))
     fb = data.load_funding_bars(conn, coin, tf, start, now, ws)
@@ -120,6 +121,8 @@ def build_timeframe(
         "c": closes,
         "volume": bars["volume"].to_list(),
         "delta": bars["delta"].to_list(),
+        "taker_cov": bars["taker_cov"].to_list(),
+        "spot_taker_cov": [spot_cov.get(t) for t in ts],
         "cvd": _cvd(bars["delta"].to_list()),
         "spot_cvd": _cvd([spot_delta.get(t) for t in ts]),
         "oi": [oi.get(t) for t in ts],

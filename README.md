@@ -333,6 +333,11 @@ This list grows as later phases add data sources.
   minute after a (re)connect and the last before a disconnect are stored but flagged
   `partial`; 1m candles then replace their OHLCV. For thin spot markets the proof can lag
   by minutes.
+- **Bars with a few missing minutes keep their delta.** A reconnect loses about a minute of
+  taker split. A bar containing one still sums every recorded minute, with `taker_cov`
+  (share of the bar covered, 0–1) and the `taker_partial` quality flag; `show` and the
+  dashboard mark such deltas with ≈. Delta is empty only for bars with no recorded
+  minute at all.
 - **The replay on subscribe isn't counted as coverage.** The trades channel resends recent
   trades on every subscribe; they are stored (deduplicated) but don't extend coverage
   backwards, because how far back they reach isn't documented.
