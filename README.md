@@ -280,6 +280,8 @@ Colours mean the same thing everywhere: blue = buy / long / up, red = sell / sho
 ```sh
 bash deploy/gcp/dashboard.sh                  # build on the VM from live data, open on your Mac
 bash deploy/gcp/dashboard.sh --bars 400 --tf 1h,4h,1d
+bash deploy/gcp/pull-and-dashboard.sh         # fresh backup → pull everything to ~/hlflows-data → build locally
+bash deploy/gcp/pull-and-dashboard.sh ~/hlflows-data --bars 400 --tf 1h,4h,1d
 HLFLOWS_CONFIG=~/hlflows-data/hlflows.toml uv run hlflows dashboard --open   # from pulled data
 ```
 

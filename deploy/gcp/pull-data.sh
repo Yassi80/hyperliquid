@@ -11,7 +11,12 @@ DEST="${1:-./data}"
 mkdir -p "$DEST"
 
 for dir in trades positions; do
-  gcloud storage rsync --recursive "gs://$BUCKET/$dir" "$DEST/$dir"
+  # positions/ appears once positions are 14 days old and get archived; skip until then.
+  if gcloud storage ls "gs://$BUCKET/$dir/" >/dev/null 2>&1; then
+    gcloud storage rsync --recursive "gs://$BUCKET/$dir" "$DEST/$dir"
+  else
+    echo "(nothing in gs://$BUCKET/$dir yet, skipping)"
+  fi
 done
 gcloud storage cp "gs://$BUCKET/backups/latest.sqlite.gz" "$DEST/hlflows.sqlite.gz"
 rm -f "$DEST/hlflows.sqlite" "$DEST/hlflows.sqlite-wal" "$DEST/hlflows.sqlite-shm"
@@ -22,5 +27,5 @@ if [ ! -f "$ABS/hlflows.toml" ]; then
   printf '[storage]\ndb_path = "%s/hlflows.sqlite"\ndata_dir = "%s"\n' "$ABS" "$ABS" \
     > "$ABS/hlflows.toml"
 fi
-echo "database: $ABS/hlflows.sqlite (nightly backup)"
+echo "database: $ABS/hlflows.sqlite (latest backup in the bucket)"
 echo "query it: HLFLOWS_CONFIG=$ABS/hlflows.toml uv run hlflows show --coin ETH"
