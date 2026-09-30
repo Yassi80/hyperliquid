@@ -39,6 +39,8 @@ cvd_slope_bars = 20               # N bars in the CVD slope window
 
 [recorder]
 ws_url = "wss://api.hyperliquid.xyz/ws"
+ws_connections = 2                # redundant connections; trades are deduplicated by id
+rotate_after_s = 9000             # replace a connection after 2.5h (the server expires them at ~3h)
 ping_interval_s = 30              # application-level ping; the server drops idle sockets
 dead_after_s = 60                 # reconnect when nothing at all arrives for this long
 stale_trades_s = 300              # reconnect when a perp market has no trades for this long

@@ -31,6 +31,11 @@ class ApiConfig(msgspec.Struct, forbid_unknown_fields=True):
 
 class RecorderConfig(msgspec.Struct, forbid_unknown_fields=True):
     ws_url: str = "wss://api.hyperliquid.xyz/ws"
+    # Redundant connections, each subscribed to everything; trades are deduplicated. The
+    # server closes a connection after ~3h ("Expired"), so each is replaced after
+    # rotate_after_s while another one is live, and no data is lost. 0 = never rotate.
+    ws_connections: int = 2
+    rotate_after_s: float = 9000.0
     ping_interval_s: float = 30.0  # application-level ping; the server drops idle sockets
     dead_after_s: float = 60.0  # reconnect when nothing at all arrives for this long
     stale_trades_s: float = 300.0  # reconnect when a perp market has no trades for this long
@@ -152,6 +157,8 @@ class Config(msgspec.Struct, forbid_unknown_fields=True):
     def validate(self) -> None:
         if self.time.week_start not in WEEKDAYS:
             raise ValueError(f"time.week_start must be one of {WEEKDAYS}")
+        if not 1 <= self.recorder.ws_connections <= 5:
+            raise ValueError("recorder.ws_connections must be 1-5 (Hyperliquid allows 10 per IP)")
         if not 0 < self.rate_limit.ceiling_pct <= 100:
             raise ValueError("rate_limit.ceiling_pct must be in (0, 100]")
         if self.funding.percentile_window_days < 1:

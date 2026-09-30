@@ -1,8 +1,12 @@
 """The long-running recorder.
 
-One asyncio process with three loops:
-  * ws_loop: one WebSocket connection with `trades` for every market and
-    `activeAssetCtx` for every perp; reconnects with jittered backoff.
+One asyncio process with these loops:
+  * ws_loop (one per connection, `recorder.ws_connections`, default 2): a WebSocket with
+    `trades` for every market and `activeAssetCtx` for every perp; reconnects with
+    jittered backoff. Connections are redundant: trades are deduplicated by id, and a
+    minute counts as recorded if any connection was live for all of it. Hyperliquid
+    closes a connection after ~3h ("Expired"), so each is replaced after
+    `rotate_after_s` while another one is healthy, and the expiry never costs data.
   * tick_loop: once a second, stages buffered trades, builds closed 1m bars, writes
     the last asset context per minute, confirms coverage, flushes finished hours to
     Parquet, checks for stale streams and writes health rows for `status`.
@@ -59,23 +63,49 @@ def _default_connect(url: str) -> Awaitable[ClientConnection]:
 
 
 @dataclass
+class WsConn:
+    """One of the redundant WebSocket connections."""
+
+    id: int
+    connected: bool = False
+    started: int = 0  # when the current session began
+    last_msg_rx: int | None = None
+    drops: int = 0  # sessions ended by the server or network
+    rotations: int = 0  # sessions we replaced before the server's ~3h expiry
+    rotating: bool = False
+    reconnect: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+@dataclass
 class MarketState:
     market: Market
-    window: LiveWindow = field(default_factory=LiveWindow)
+    windows: dict[int, LiveWindow] = field(default_factory=dict)  # per connection
     built_upto: int = 0  # next minute to build
-    last_trade_rx: int | None = None  # local receive time of the last trade
+    last_trade_rx: int | None = None  # local receive time of the last trade (any connection)
     last_trade_ts: int | None = None  # exchange time of the last trade
+    rx: dict[int, int] = field(default_factory=dict)  # last trade received, per connection
     inserted: int = 0
+
+    def is_full(self, minute: int) -> bool:
+        return any(w.is_full(minute) for w in self.windows.values())
 
 
 @dataclass
 class CtxState:
     coin: str
-    window: LiveWindow = field(default_factory=LiveWindow)
+    windows: dict[int, LiveWindow] = field(default_factory=dict)  # per connection
     pending: tuple[int, t.PerpAssetCtx] | None = None  # (minute, latest sample in it)
     completed: list[tuple[int, t.PerpAssetCtx]] = field(default_factory=list)  # to write
     last_rx: int | None = None
+    rx: dict[int, int] = field(default_factory=dict)  # last sample received, per connection
     samples: int = 0
+
+    def is_full(self, minute: int) -> bool:
+        return any(w.is_full(minute) for w in self.windows.values())
+
+
+def _others_live(windows: dict[int, LiveWindow], cid: int) -> bool:
+    return any(w.connected for k, w in windows.items() if k != cid)
 
 
 class Recorder:
@@ -103,12 +133,9 @@ class Recorder:
         self.ctx: dict[str, CtxState] = {}  # by perp hl_name
 
         self.stop_event = asyncio.Event()
-        self.reconnect_event = asyncio.Event()
-        self.connected = False
+        self.conns = [WsConn(i) for i in range(self.rc.ws_connections)]
         self.stopped = False
-        self.reconnects = 0
         self.decode_errors = 0
-        self.last_msg_rx: int | None = None
 
         self._trade_buffer: list[t.WsTrade] = []
         self._coverage_buffer: list[tuple[str, str, int, int]] = []
@@ -118,6 +145,22 @@ class Recorder:
         self._last_flush = 0
         self._last_heartbeat = 0
         self._rest_status: dict[str, tuple[int | None, str | None]] = {}
+
+    @property
+    def connected(self) -> bool:
+        return any(c.connected for c in self.conns)
+
+    @property
+    def reconnects(self) -> int:
+        return sum(c.drops for c in self.conns)
+
+    @property
+    def last_msg_rx(self) -> int | None:
+        times = [c.last_msg_rx for c in self.conns if c.last_msg_rx is not None]
+        return max(times) if times else None
+
+    def _windows(self) -> dict[int, LiveWindow]:
+        return {c.id: LiveWindow() for c in self.conns}
 
     # ------------------------------------------------------------------ setup
 
@@ -141,11 +184,11 @@ class Recorder:
         for m in markets:
             if m.coin not in wanted:
                 continue
-            self.markets[m.market] = MarketState(m, built_upto=start_minute)
+            self.markets[m.market] = MarketState(m, self._windows(), built_upto=start_minute)
             self.by_hl[m.hl_name] = m.market
             self.coin_of[m.market] = m.coin
             if m.kind == "perp":
-                self.ctx[m.hl_name] = CtxState(m.coin)
+                self.ctx[m.hl_name] = CtxState(m.coin, self._windows())
         if not self.markets:
             raise RuntimeError("no markets resolved; check markets.coins in the config")
         log.info("recording %s", ", ".join(sorted(self.markets)))
@@ -160,7 +203,7 @@ class Recorder:
     async def run(self, duration_s: float | None = None) -> None:
         await self.setup()
         tasks = [
-            asyncio.create_task(self.ws_loop(), name="ws"),
+            *(asyncio.create_task(self.ws_loop(c), name=f"ws{c.id}") for c in self.conns),
             asyncio.create_task(self.tick_loop(), name="tick"),
             asyncio.create_task(self.rest_loop(), name="rest"),
             asyncio.create_task(self.wallet_loop(), name="wallets"),
@@ -192,7 +235,8 @@ class Recorder:
         """Final flush: stage buffered trades, build every started minute (the current
         one as partial), write pending context, mark streams disconnected."""
         now = self.clock()
-        self._on_disconnect()
+        for c in self.conns:
+            self._on_disconnect(c)
         self.tick(now, final=True)
         self.stopped = True
         self.write_health(now)
@@ -200,36 +244,47 @@ class Recorder:
 
     # ------------------------------------------------------------------ websocket
 
-    async def ws_loop(self) -> None:
+    async def ws_loop(self, c: WsConn) -> None:
+        # Stagger the connections' first subscribe bursts a little.
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self.stop_event.wait(), c.id * 3.0)
         attempt = 0
         while not self.stop_event.is_set():
             started = self.clock()
             try:
                 ws = await self.connect(self.rc.ws_url)
                 try:
-                    await self._session(ws)
+                    await self._session(ws, c)
                 finally:
                     await ws.close()
             except (OSError, TimeoutError, websockets.WebSocketException) as exc:
-                log.warning("websocket: %r", exc)
+                if not c.rotating:
+                    log.warning("websocket %d: %r", c.id, exc)
             finally:
-                self._on_disconnect()
+                rotated = c.rotating
+                self._on_disconnect(c)
             if self.stop_event.is_set():
                 break
-            if self.clock() - started > 5 * MINUTE_MS:
+            if rotated:
+                c.rotations += 1
+                c.rotating = False
                 attempt = 0
-            delay = min(self.rc.reconnect_cap_s, self.rc.reconnect_base_s * 2**attempt)
-            delay = delay * (0.5 + random.random() / 2)
-            attempt += 1
-            self.reconnects += 1
-            log.info("reconnecting in %.1fs", delay)
+                delay = 0.1
+            else:
+                c.drops += 1
+                if self.clock() - started > 5 * MINUTE_MS:
+                    attempt = 0
+                delay = min(self.rc.reconnect_cap_s, self.rc.reconnect_base_s * 2**attempt)
+                delay = delay * (0.5 + random.random() / 2)
+                attempt += 1
+            log.info("connection %d reconnecting in %.1fs", c.id, delay)
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self.stop_event.wait(), delay)
 
-    async def _session(self, ws: ClientConnection) -> None:
-        self.reconnect_event.clear()
-        self.connected = True
-        self.last_msg_rx = self.clock()
+    async def _session(self, ws: ClientConnection, c: WsConn) -> None:
+        c.reconnect.clear()
+        c.connected = True
+        c.started = c.last_msg_rx = self.clock()
 
         async def subscribe() -> None:
             # Paced, and concurrent with reading so nothing sent meanwhile is held back.
@@ -244,10 +299,10 @@ class Recorder:
 
         helpers = [asyncio.create_task(subscribe()), asyncio.create_task(pinger())]
         try:
-            while not (self.stop_event.is_set() or self.reconnect_event.is_set()):
+            while not (self.stop_event.is_set() or c.reconnect.is_set()):
                 recv = asyncio.create_task(ws.recv())
                 stop = asyncio.create_task(self.stop_event.wait())
-                again = asyncio.create_task(self.reconnect_event.wait())
+                again = asyncio.create_task(c.reconnect.wait())
                 done, pending = await asyncio.wait(
                     [recv, stop, again],
                     timeout=self.rc.dead_after_s,
@@ -255,41 +310,47 @@ class Recorder:
                 )
                 for p in pending:
                     p.cancel()
+                # Collect them: a cancelled recv() can still finish with ConnectionClosed
+                # when the socket closes, and an uncollected exception gets logged.
+                await asyncio.gather(*pending, return_exceptions=True)
                 if not done:
-                    log.warning("no messages for %.0fs; reconnecting", self.rc.dead_after_s)
+                    log.warning(
+                        "connection %d: no messages for %.0fs; reconnecting",
+                        c.id, self.rc.dead_after_s,
+                    )  # fmt: skip
                     return
                 if recv in done:
-                    self.handle_message(recv.result(), self.clock())
+                    self.handle_message(recv.result(), self.clock(), c.id)
         finally:
             for task in helpers:
                 task.cancel()
             # A send failing on a closed socket is reported by recv(); don't re-raise it.
             await asyncio.gather(*helpers, return_exceptions=True)
 
-    def _on_disconnect(self) -> None:
-        if not self.connected:
+    def _on_disconnect(self, c: WsConn) -> None:
+        if not c.connected:
             return
         # Nothing after the last message received is known to have been delivered.
-        until = self.last_msg_rx if self.last_msg_rx is not None else self.clock()
-        self.connected = False
+        until = c.last_msg_rx if c.last_msg_rx is not None else self.clock()
+        c.connected = False
         for s in self.markets.values():
-            s.window.on_disconnect(until)
-        for c in self.ctx.values():
-            c.window.on_disconnect(until)
+            s.windows[c.id].on_disconnect(until)
+        for x in self.ctx.values():
+            x.windows[c.id].on_disconnect(until)
 
     # ------------------------------------------------------------------ messages
 
-    def handle_message(self, raw: str | bytes, now: int) -> None:
-        self.last_msg_rx = now
+    def handle_message(self, raw: str | bytes, now: int, cid: int = 0) -> None:
+        self.conns[cid].last_msg_rx = now
         try:
-            self._handle(raw, now)
+            self._handle(raw, now, cid)
         except (msgspec.DecodeError, msgspec.ValidationError) as exc:
             # Don't let one unexpected payload stop recording; surface it in logs and status.
             self.decode_errors += 1
             snippet = raw[:300] if isinstance(raw, str) else raw[:300].decode(errors="replace")
             log.error("could not decode message (%s): %s", exc, snippet)
 
-    def _handle(self, raw: str | bytes, now: int) -> None:
+    def _handle(self, raw: str | bytes, now: int, cid: int) -> None:
         env = t.decode(raw, t.WsEnvelope)
         if env.channel == "trades":
             trades = t.decode(env.data, list[t.WsTrade])
@@ -298,9 +359,9 @@ class Recorder:
                 if market is None:
                     continue
                 state = self.markets[market]
-                state.last_trade_rx = now
+                state.last_trade_rx = state.rx[cid] = now
                 state.last_trade_ts = max(state.last_trade_ts or 0, tr.time)
-                span = state.window.on_trade(tr.time)
+                span = state.windows[cid].on_trade(tr.time)
                 if span is not None:
                     for stream in (bars_stream("1m"), TAKER_STREAM):
                         self._coverage_buffer.append((stream, market, *span))
@@ -314,19 +375,25 @@ class Recorder:
             if c.pending is not None and c.pending[0] != minute:
                 c.completed.append(c.pending)  # written by the next tick
             c.pending = (minute, msg.ctx)
-            c.last_rx = now
+            c.last_rx = c.rx[cid] = now
             c.samples += 1
         elif env.channel == "subscriptionResponse":
-            self._on_ack(msgspec.json.decode(env.data), now)
+            self._on_ack(msgspec.json.decode(env.data), now, cid)
         elif env.channel == "error":
             log.error("server error: %s", bytes(env.data)[:300].decode(errors="replace"))
 
-    def _on_ack(self, data: Any, now: int) -> None:
+    def _on_ack(self, data: Any, now: int, cid: int) -> None:
+        """A subscription went live on connection `cid`. If no other connection was live
+        for that stream, everything since its coverage ended is a gap."""
         sub = data.get("subscription", {}) if isinstance(data, dict) else {}
         kind, coin = sub.get("type"), sub.get("coin")
         if kind == "trades" and coin in self.by_hl:
             market = self.by_hl[coin]
-            live_from = self.markets[market].window.on_ack(now)
+            s = self.markets[market]
+            covered = _others_live(s.windows, cid)
+            live_from = s.windows[cid].on_ack(now)
+            if covered:
+                return
             self._record_resume_gap(market, TAKER_STREAM, live_from, "s3", "recorder not live")
             # OHLCV for the gap can still come from 1m candles (the taker split can't).
             gap_start = self._record_resume_gap(
@@ -336,7 +403,10 @@ class Recorder:
                 self._catchup.append((market, gap_start, live_from))
         elif kind == "activeAssetCtx" and coin in self.ctx:
             c = self.ctx[coin]
-            live_from = c.window.on_ack(now)
+            covered = _others_live(c.windows, cid)
+            live_from = c.windows[cid].on_ack(now)
+            if covered:
+                return
             self._record_resume_gap(c.coin, CTX_STREAM, live_from, "s3", "recorder not live")
 
     def _last_covered(self, stream: str, market: str) -> int | None:
@@ -391,7 +461,7 @@ class Recorder:
                 low = s.market.significance == "low"
                 while s.built_upto < build_until:
                     m = s.built_upto
-                    bar = build_bar(self.conn, s.market.market, m, not s.window.is_full(m), low)
+                    bar = build_bar(self.conn, s.market.market, m, not s.is_full(m), low)
                     if bar is not None:
                         bars.append(bar)
                     s.built_upto += MINUTE_MS
@@ -400,7 +470,7 @@ class Recorder:
                 if minute >= s.built_upto:
                     continue  # will be built normally
                 bar = build_bar(
-                    self.conn, market, minute, not s.window.is_full(minute),
+                    self.conn, market, minute, not s.is_full(minute),
                     s.market.significance == "low",
                 )  # fmt: skip
                 if bar is not None:
@@ -418,7 +488,7 @@ class Recorder:
                     c.completed.append(c.pending)
                     c.pending = None
                 for minute, ctx in c.completed:
-                    self._write_ctx(c.coin, c.window, minute, ctx)
+                    self._write_ctx(c, minute, ctx)
                 c.completed.clear()
 
         if final or now - self._last_flush >= MINUTE_MS:
@@ -430,10 +500,10 @@ class Recorder:
             self.write_health(now)
             self._last_heartbeat = now
 
-    def _write_ctx(self, coin: str, window: LiveWindow, minute: int, ctx: t.PerpAssetCtx) -> None:
-        store.upsert_asset_ctx(self.conn, coin, minute, ctx, "ws")
-        if window.is_full(minute):
-            cov.add_coverage(self.conn, CTX_STREAM, coin, minute, minute + MINUTE_MS)
+    def _write_ctx(self, c: CtxState, minute: int, ctx: t.PerpAssetCtx) -> None:
+        store.upsert_asset_ctx(self.conn, c.coin, minute, ctx, "ws")
+        if c.is_full(minute):
+            cov.add_coverage(self.conn, CTX_STREAM, c.coin, minute, minute + MINUTE_MS)
 
     def _flush_parquet(self, before: int) -> None:
         # Only hours that finished before the flush horizon; the rest stay staged.
@@ -445,24 +515,49 @@ class Recorder:
             log.info("wrote %s trades for %s %s", n, market, fmt_ms(hour))
 
     def _check_stale(self, now: int) -> None:
-        if not self.connected or self.reconnect_event.is_set():
-            return
-        reasons = []
-        for s in self.markets.values():
-            if s.market.kind != "perp" or s.window.live_from is None:
+        """Per connection: reconnect it if one of its streams went stale; otherwise rotate
+        it once it's older than rotate_after_s, if another connection is healthy (so a
+        stream is live throughout) and no other rotation is in progress."""
+        healthy = {
+            c.id for c in self.conns
+            if c.connected and not c.rotating and not c.reconnect.is_set()
+            and now - c.started >= MINUTE_MS
+        }  # fmt: skip
+        for c in self.conns:
+            if not c.connected or c.reconnect.is_set():
                 continue
-            last = s.last_trade_rx or s.window.live_from
-            if now - last > self.rc.stale_trades_s * 1000:
-                reasons.append(f"no {s.market.market} trades for {(now - last) / 1000:.0f}s")
-        for c in self.ctx.values():
-            if c.window.live_from is None:
+            reasons = []
+            for s in self.markets.values():
+                w = s.windows[c.id]
+                if s.market.kind != "perp" or w.live_from is None:
+                    continue
+                last = max(s.rx.get(c.id, 0), w.live_from)
+                if now - last > self.rc.stale_trades_s * 1000:
+                    reasons.append(f"no {s.market.market} trades for {(now - last) / 1000:.0f}s")
+            for x in self.ctx.values():
+                w = x.windows[c.id]
+                if w.live_from is None:
+                    continue
+                last = max(x.rx.get(c.id, 0), w.live_from)
+                if now - last > self.rc.stale_ctx_s * 1000:
+                    reasons.append(f"no {x.coin} asset context for {(now - last) / 1000:.0f}s")
+            if reasons:
+                log.warning("connection %d stale (%s); reconnecting", c.id, "; ".join(reasons))
+                c.reconnect.set()
+                healthy.discard(c.id)
                 continue
-            last = c.last_rx or c.window.live_from
-            if now - last > self.rc.stale_ctx_s * 1000:
-                reasons.append(f"no {c.coin} asset context for {(now - last) / 1000:.0f}s")
-        if reasons:
-            log.warning("stale feed (%s); reconnecting", "; ".join(reasons))
-            self.reconnect_event.set()
+            age = now - c.started
+            if (
+                self.rc.rotate_after_s > 0
+                and age >= self.rc.rotate_after_s * 1000
+                and healthy - {c.id}
+                and not any(o.rotating for o in self.conns)
+            ):
+                log.info("rotating connection %d after %.1fh (the server expires connections "
+                         "after ~3h)", c.id, age / HOUR_MS)  # fmt: skip
+                c.rotating = True
+                c.reconnect.set()
+                healthy.discard(c.id)
 
     # ------------------------------------------------------------------ health
 
@@ -479,7 +574,13 @@ class Recorder:
                 self.last_msg_rx,
                 now if self.connected else None,
                 self.reconnects,
-                f"{self.decode_errors} undecodable messages" if self.decode_errors else None,
+                ", ".join(
+                    [
+                        f"{sum(c.connected for c in self.conns)}/{len(self.conns)} connected",
+                        f"{sum(c.rotations for c in self.conns)} rotations",
+                    ]
+                    + ([f"{self.decode_errors} undecodable messages"] if self.decode_errors else [])
+                ),
             ),
         ]
         for s in self.markets.values():

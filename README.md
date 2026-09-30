@@ -68,9 +68,14 @@ Re-running it is safe: every write is an idempotent upsert.
 
 ## The recorder
 
-`record` runs one process with one WebSocket connection (`trades` for every perp and spot
-market, `activeAssetCtx` for every perp: 12 of the 1000 subscriptions allowed per IP) plus
-REST polling:
+`record` runs one process with two redundant WebSocket connections, each subscribed to
+`trades` for every perp and spot market and `activeAssetCtx` for every perp (24 of the
+1,000 subscriptions and 2 of the 10 connections allowed per IP), plus REST polling.
+Trades are deduplicated by id, and a minute counts as recorded if either connection was
+live for all of it. Hyperliquid closes every connection after about 3 hours (close code
+1000, reason "Expired"); the recorder replaces each connection after 2.5 hours, one at a
+time and only while the other has been healthy for a minute, so the expiry never costs
+data. An unexpected drop of one connection is covered by the other.
 
 | What | How | Stored as |
 |---|---|---|
@@ -87,8 +92,9 @@ from 1m candles (`rest`, done automatically if within ~3.5 days) or the taker sp
 from the S3 archive (`s3`). `status` lists open gaps.
 
 Reconnects use exponential backoff with jitter, and subscriptions are paced. A
-connection that goes silent for 60 s, a perp market with no trades for 5 min, or an
-asset context that stops for 60 s forces a reconnect. Memory use is about 80 MB.
+connection that goes silent for 60 s, a perp market with no trades for 5 min on that
+connection, or an asset context that stops for 60 s forces that connection to reconnect.
+`status` shows `ws` with unexpected drops as the count and "2/2 connected, N rotations". Memory use is about 80 MB.
 
 ## Wallet positioning
 
@@ -333,8 +339,8 @@ This list grows as later phases add data sources.
   minute after a (re)connect and the last before a disconnect are stored but flagged
   `partial`; 1m candles then replace their OHLCV. For thin spot markets the proof can lag
   by minutes.
-- **Bars with a few missing minutes keep their delta.** A reconnect loses about a minute of
-  taker split. A bar containing one still sums every recorded minute, with `taker_cov`
+- **Bars with a few missing minutes keep their delta.** When no connection is live (both
+  dropped at once, a restart or a deploy) about a minute of taker split is lost. A bar containing one still sums every recorded minute, with `taker_cov`
   (share of the bar covered, 0–1) and the `taker_partial` quality flag; `show` and the
   dashboard mark such deltas with ≈. Delta is empty only for bars with no recorded
   minute at all.

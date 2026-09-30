@@ -62,7 +62,7 @@ def cfg(tmp_path: Path) -> Config:
         storage=StorageConfig(db_path=str(tmp_path / "db.sqlite"), data_dir=str(tmp_path)),
         recorder=RecorderConfig(
             subscribe_pause_s=0, reconnect_base_s=0.01, reconnect_cap_s=0.05,
-            ping_interval_s=0.05, dead_after_s=0.3,
+            ping_interval_s=0.05, dead_after_s=0.3, ws_connections=1,
         ),
     )  # fmt: skip
 
@@ -76,10 +76,11 @@ async def recorder(cfg: Config, conn: sqlite3.Connection) -> AsyncIterator[Recor
         yield rec
 
 
-def ack_all(rec: Recorder, now: int) -> None:
+def ack_all(rec: Recorder, now: int, cid: int = 0) -> None:
+    rec.conns[cid].connected = True
+    rec.conns[cid].started = now
     for sub in rec.subscriptions():
-        rec.handle_message(ack(sub["type"], sub["coin"]), now)
-    rec.connected = True
+        rec.handle_message(ack(sub["type"], sub["coin"]), now, cid)
 
 
 def bar_row(conn: sqlite3.Connection, market: str, ts: int) -> sqlite3.Row:
@@ -148,7 +149,7 @@ async def test_resume_records_gaps_and_queues_catchup(
     rec.handle_message(trades_msg((1, M1 + 1_000, "B", 100, 1)), M1 + 1_100)
     rec.handle_message(trades_msg((2, M2 + 1_000, "B", 100, 1)), M2 + 1_100)
     rec.tick(M2 + 6_000)
-    rec._on_disconnect()
+    rec._on_disconnect(rec.conns[0])
 
     resume = M0 + 7 * MINUTE_MS + 10_000
     ack_all(rec, resume)
@@ -211,7 +212,7 @@ async def _run_ws(rec: Recorder, server: FakeWsServer, until: Any) -> None:
         port = srv.sockets[0].getsockname()[1]
         rec.rc.ws_url = f"ws://127.0.0.1:{port}"
         rec.connect = lambda url: websockets.connect(url, ping_interval=None)
-        task = asyncio.create_task(rec.ws_loop())
+        task = asyncio.create_task(rec.ws_loop(rec.conns[0]))
         for _ in range(200):
             await asyncio.sleep(0.02)
             if until():
@@ -258,7 +259,7 @@ async def test_bad_message_is_logged_not_fatal(
     assert rec.decode_errors == 2 and len(rec._trade_buffer) == 1
     rec.write_health(M0 + 41_000)
     detail = conn.execute("SELECT detail FROM stream_state WHERE stream = 'ws'").fetchone()[0]
-    assert detail == "2 undecodable messages"
+    assert detail == "1/1 connected, 0 rotations, 2 undecodable messages"
 
 
 async def test_tick_records_trade_addresses(recorder: Recorder, conn: sqlite3.Connection) -> None:
@@ -319,3 +320,100 @@ async def test_liquidation_provider_hook(cfg: Config, conn: sqlite3.Connection) 
     cfg.liquidation_provider.name = "missing"
     with pytest.raises(ValueError, match="no liquidation provider adapter"):
         providers.make_provider(cfg.liquidation_provider)
+
+
+async def _two_connections(cfg: Config, conn: sqlite3.Connection) -> AsyncIterator[Recorder]:
+    cfg.recorder.ws_connections = 2
+    http = httpx.AsyncClient(transport=httpx.MockTransport(FakeInfo()))
+    async with InfoClient(WeightBudget(conn, 10_000), URL, http=http) as client:
+        rec = Recorder(cfg, conn, client, clock=Clock(M0 + 20_000))
+        await rec.setup()
+        yield rec
+
+
+@pytest.fixture
+async def recorder2(cfg: Config, conn: sqlite3.Connection) -> AsyncIterator[Recorder]:
+    async for rec in _two_connections(cfg, conn):
+        yield rec
+
+
+def minute_trades(start_tid: int, minute: int, n: int = 3) -> str:
+    return trades_msg(*[(start_tid + i, minute + 10_000 * (i + 1), "B", 100, 1) for i in range(n)])
+
+
+async def test_second_connection_covers_the_first_closing(
+    recorder2: Recorder, conn: sqlite3.Connection
+) -> None:
+    """A rotation or server expiry on one connection costs nothing while another is live."""
+    rec = recorder2
+    M = [M0 + k * MINUTE_MS for k in range(8)]
+    ack_all(rec, M0 + 20_000, cid=0)  # connection 0 live from M1
+    for k in (1, 2):
+        rec.handle_message(minute_trades(100 * k, M[k]), M[k] + 40_000, 0)
+    ack_all(rec, M[2] + 30_000, cid=1)  # connection 1 joins; live from M3
+    for k in (3, 4):  # both connections deliver the same trades
+        rec.handle_message(minute_trades(100 * k, M[k]), M[k] + 40_000, 0)
+        rec.handle_message(minute_trades(100 * k, M[k]), M[k] + 40_100, 1)
+    rec.conns[0].last_msg_rx = M[4] + 40_000
+    rec._on_disconnect(rec.conns[0])  # connection 0 is replaced / expires in minute 4
+    for k in (5, 6):
+        rec.handle_message(minute_trades(100 * k, M[k]), M[k] + 40_000, 1)
+    rec.tick(M[6] + 6_000)
+
+    rows = conn.execute(
+        "SELECT ts, n, quality FROM bars WHERE market = 'BTC' AND res = '1m' AND ts >= ?"
+        " ORDER BY ts", (M[1],)
+    ).fetchall()  # fmt: skip
+    assert [(r["ts"], r["n"], r["quality"]) for r in rows] == [(M[k], 3, None) for k in range(1, 6)]
+    assert cov.get_coverage(conn, data.TAKER_STREAM, "BTC") == [(M[1], M[6])]
+    assert conn.execute("SELECT COUNT(*) FROM gaps").fetchone()[0] == 0
+    # Re-acking connection 0 while connection 1 is live records no gap either.
+    ack_all(rec, M[6] + 50_000, cid=0)
+    assert conn.execute("SELECT COUNT(*) FROM gaps").fetchone()[0] == 0
+
+
+async def test_gap_when_every_connection_is_down(
+    recorder2: Recorder, conn: sqlite3.Connection
+) -> None:
+    rec = recorder2
+    M = [M0 + k * MINUTE_MS for k in range(10)]
+    ack_all(rec, M0 + 20_000, cid=0)
+    ack_all(rec, M0 + 25_000, cid=1)
+    for k in (1, 2):
+        rec.handle_message(minute_trades(100 * k, M[k]), M[k] + 40_000, 0)
+    rec.tick(M[2] + 50_000)
+    for c in rec.conns:
+        c.last_msg_rx = M[2] + 40_000
+        rec._on_disconnect(c)
+    ack_all(rec, M[6] + 10_000, cid=1)
+    gap = conn.execute(
+        "SELECT start_ts, end_ts FROM gaps WHERE stream = 'taker_1m' AND market = 'BTC'"
+    ).fetchone()
+    assert (gap["start_ts"], gap["end_ts"]) == (M[2], M[7])
+
+
+async def test_rotation_only_with_a_healthy_peer(recorder2: Recorder) -> None:
+    rec = recorder2
+    now = M0 + 10 * HOUR_MS
+    old, young = rec.conns
+    old.connected = young.connected = True
+    old.started = now - 3 * HOUR_MS
+    young.started = now - 10_000  # just connected: not trusted yet
+    rec._check_stale(now)
+    assert not old.rotating and not old.reconnect.is_set()
+    young.started = now - 2 * MINUTE_MS
+    rec._check_stale(now)
+    assert old.rotating and old.reconnect.is_set()
+    assert not young.rotating  # one rotation at a time, and it's young anyway
+    young.started = now - 3 * HOUR_MS
+    rec._check_stale(now)
+    assert not young.rotating  # waits until the rotating peer is back and healthy
+
+
+async def test_single_connection_never_rotates(recorder: Recorder) -> None:
+    rec = recorder
+    now = M0 + 10 * HOUR_MS
+    rec.conns[0].connected = True
+    rec.conns[0].started = now - 5 * HOUR_MS
+    rec._check_stale(now)
+    assert not rec.conns[0].rotating
