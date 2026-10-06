@@ -117,7 +117,7 @@
       <p class="note">Each panel has its own scale. Blue = buy / long / up, red = sell / short / down.
         CVD is anchored at the left edge of the window. A bar missing a few minutes of taker data (a reconnect) still counts, and its hover
         says how much of the bar was covered; breaks in a line are bars with no taker data at all, after which the sum resumes.
-        Watchlist notional also moves as wallets join or leave the watchlist; the net-flow panel counts only wallets present at both ends of each bar.</p>
+        Watchlist positions are in coin units (they also move as wallets join or leave the watchlist); the net-flow panel counts only wallets present at both ends of each bar.</p>
     </div>
     <div class="card">
       <h2>Liquidation map (watchlist)</h2>
@@ -225,8 +225,8 @@ const PANELS = [
   { key: "cvd", title: "Perp CVD (coin units)", h: 0.10 },
   { key: "spot", title: "Spot CVD (coin units)", h: 0.08 },
   { key: "fund", title: "Funding and premium (8h, %)", h: 0.10 },
-  { key: "watch", title: "Watchlist notional (USD)", h: 0.12 },
-  { key: "flow", title: "Watchlist net flow, same wallets, cumulative (USD)", h: 0.10 },
+  { key: "watch", title: "Watchlist positions (coin units)", h: 0.12 },
+  { key: "flow", title: "Watchlist net flow, same wallets, cumulative (coin units)", h: 0.10 },
   { key: "liq", title: "Liquidations per bar (USD, partial)", h: 0.08 },
 ];
 
@@ -248,8 +248,8 @@ function renderChart(c, t) {
   };
   const hasData = {
     price: t.c.some(isNum), oi: t.oi.some(isNum), cvd: t.cvd.some(isNum), spot: t.spot_cvd.some(isNum),
-    fund: t.funding_8h.some(isNum) || t.premium.some(isNum), watch: t.watch_long.some(isNum),
-    flow: t.watch_flow.some(isNum), liq: t.liq_long.some(v => v > 0) || t.liq_short.some(v => v > 0),
+    fund: t.funding_8h.some(isNum) || t.premium.some(isNum), watch: t.watch_long_sz.some(isNum),
+    flow: t.watch_flow_sz.some(isNum), liq: t.liq_long.some(v => v > 0) || t.liq_short.some(v => v > 0),
   };
   let top = 1.0;
   PANELS.forEach((p, i) => {
@@ -285,9 +285,9 @@ function renderChart(c, t) {
       hovertemplate: "%{y:,.2f}%{customdata}" }),
     line(t.funding_8h, "funding (8h eq.)", perp, { yaxis: Y.fund, hovertemplate: "%{y:.4f}%" }),
     line(t.premium, "premium (8h)", prem, { yaxis: Y.fund, hovertemplate: "%{y:.4f}%" }),
-    line(t.watch_long, "watchlist long", buy, { yaxis: Y.watch, hovertemplate: "%{y:$,.3s}" }),
-    line(t.watch_short, "watchlist short", sell, { yaxis: Y.watch, hovertemplate: "%{y:$,.3s}" }),
-    line(t.watch_flow, "net flow", perp, { yaxis: Y.flow, showlegend: false, hovertemplate: "%{y:$,.3s}" }),
+    line(t.watch_long_sz, "watchlist long", buy, { yaxis: Y.watch, hovertemplate: "%{y:,.2f}" }),
+    line(t.watch_short_sz, "watchlist short", sell, { yaxis: Y.watch, hovertemplate: "%{y:,.2f}" }),
+    line(t.watch_flow_sz, "net flow", perp, { yaxis: Y.flow, showlegend: false, hovertemplate: "%{y:+,.2f}" }),
     { type: "bar", x, y: t.liq_long, name: "longs liquidated", yaxis: Y.liq, marker: { color: buy },
       hovertemplate: "%{y:$,.3s}" },
     { type: "bar", x, y: t.liq_short, name: "shorts liquidated", yaxis: Y.liq, marker: { color: sell },
@@ -332,8 +332,8 @@ function renderTable(t) {
     ["taker cov.", i => covPct(t.taker_cov[i])],
     ["perp CVD", i => num(t.cvd[i])], ["spot CVD", i => num(t.spot_cvd[i])], ["OI", i => num(t.oi[i], 0)],
     ["funding 8h", i => pct(t.funding_8h[i], 4)], ["premium", i => pct(t.premium[i], 4)],
-    ["watch long", i => usd(t.watch_long[i])], ["watch short", i => usd(t.watch_short[i])],
-    ["net flow", i => usd(t.watch_flow[i])], ["liq L", i => usd(t.liq_long[i])], ["liq S", i => usd(t.liq_short[i])]];
+    ["watch long (coin)", i => num(t.watch_long_sz[i])], ["watch short (coin)", i => num(t.watch_short_sz[i])],
+    ["net flow (coin)", i => num(t.watch_flow_sz[i])], ["liq L", i => usd(t.liq_long[i])], ["liq S", i => usd(t.liq_short[i])]];
   const idx = [...t.ts.keys()].reverse();
   document.getElementById("tableview").innerHTML = `<table><thead><tr>${cols.map(c => `<th scope="col">${c[0]}</th>`).join("")}</tr></thead>` +
     `<tbody>${idx.map(i => `<tr>${cols.map(c => `<td>${c[1](i)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;

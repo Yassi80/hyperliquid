@@ -319,8 +319,9 @@ def flow_series(
     data_dir: str | None = None,
 ) -> list[dict[str, float | int | None]]:
     """Per bar (given the snapshot round at each bar's close, or None): watchlist long and
-    short notional, and the same-wallet net change in coin units since the previous
-    bar's round (only wallets watched and polled OK in both rounds, none excluded)."""
+    short notional (USD) and size (coin units), and the same-wallet net change in coin
+    units since the previous bar's round (only wallets watched and polled OK in both
+    rounds, none excluded)."""
     known = sorted({r for r in rounds if r is not None})
     snap = positions_by_round(conn, coin, known, data_dir)
     events = ws.load_events(conn)
@@ -336,13 +337,15 @@ def flow_series(
     prev: int | None = None
     for r in rounds:
         row: dict[str, float | int | None] = {
-            "long_ntl": None, "short_ntl": None, "n_long": None, "n_short": None,
-            "net_change": None,
+            "long_ntl": None, "short_ntl": None, "long_sz": None, "short_sz": None,
+            "n_long": None, "n_short": None, "net_change": None,
         }  # fmt: skip
         if r is not None:
             pos = {a: v for a, v in snap[r].items() if a not in excluded}
             row["long_ntl"] = sum(v for s, v in pos.values() if s > 0)
             row["short_ntl"] = sum(v for s, v in pos.values() if s < 0)
+            row["long_sz"] = sum(s for s, _ in pos.values() if s > 0)  # coin units
+            row["short_sz"] = sum(-s for s, _ in pos.values() if s < 0)
             row["n_long"] = sum(1 for s, _ in pos.values() if s > 0)
             row["n_short"] = sum(1 for s, _ in pos.values() if s < 0)
             if prev is not None and prev != r:

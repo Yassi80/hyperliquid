@@ -57,6 +57,9 @@ def test_build_and_render(conn: sqlite3.Connection, tmp_path: Path) -> None:
     assert t["cvd"] == [24.0, 48.0]
     assert t["watch_long"] == [100.0, 300.0]
     assert t["watch_flow"] == [0.0, 2.0 * 100.5]  # +2 BTC over the second hour, at its close
+    assert t["watch_long_sz"] == [1.0, 3.0]  # coin units
+    assert t["watch_short_sz"] == [0.0, 0.0]
+    assert t["watch_flow_sz"] == [0.0, 2.0]
 
     html = dash.render_html(payload)
     blob = re.search(r"const DATA = (\{.*?\});\n", html, re.S)

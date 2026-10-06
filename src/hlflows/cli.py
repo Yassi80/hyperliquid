@@ -365,6 +365,9 @@ def dashboard(
     tf: Annotated[str, typer.Option(help="Timeframes to include")] = "15m,1h,4h,1d",
     bars: Annotated[int, typer.Option(help="Bars per timeframe")] = 200,
     out: Annotated[Path | None, typer.Option(help="Output .html file")] = None,
+    json_out: Annotated[
+        Path | None, typer.Option("--json", help="Also write the data as JSON (for alerts)")
+    ] = None,
     open_: Annotated[bool, typer.Option("--open", help="Open it in the browser")] = False,
 ) -> None:
     """Write a self-contained HTML dashboard of the flows data (charts, tables, liq map)."""
@@ -378,10 +381,93 @@ def dashboard(
     payload = dash.build(cfg, conn, coins, parse_timeframes(tf), bars)
     path = out or Path(cfg.storage.data_dir) / "dashboard.html"
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(dash.render_html(payload))
-    tmp.chmod(0o644)
-    tmp.replace(path)  # atomic: a web server never sees a half-written page
-    console.print(f"wrote {path}")
+    targets = [(path, dash.render_html(payload))]
+    if json_out is not None:
+        targets.append((json_out, dash.render_json(payload)))
+    for target, text in targets:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        tmp.write_text(text)
+        tmp.chmod(0o644)
+        tmp.replace(target)  # atomic: readers never see a half-written file
+        console.print(f"wrote {target}")
     if open_:
         webbrowser.open(path.resolve().as_uri())
+
+
+@app.command()
+def alerts(
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Evaluate, print, send nothing")
+    ] = False,
+    test_push: Annotated[
+        bool, typer.Option("--test-push", help="Send a test notification")
+    ] = False,
+    test_routine: Annotated[
+        bool, typer.Option("--test-routine", help="Fire the Claude routine with a test payload")
+    ] = False,
+    history: Annotated[int, typer.Option(help="Show the last N alerts instead")] = 0,
+) -> None:
+    """Check the alert rules on flows.json (written by `dashboard --json`), push new alerts
+    via ntfy and, if configured, hand them to the Claude Code routine."""
+    import json as json_mod
+
+    import httpx
+
+    from hlflows.alerts import deliver, engine
+    from hlflows.alerts.rules import Alert
+
+    cfg = _config()
+    a = cfg.alerts
+    conn = db.connect(cfg.storage.db_path)
+
+    if history:
+        rows = conn.execute("SELECT * FROM alerts ORDER BY ts DESC LIMIT ?", (history,)).fetchall()
+        table = Table(title=f"Last {len(rows)} alerts", title_justify="left")
+        for col in ("time (UTC)", "rule", "coin", "tf", "direction", "title", "pushed", "routine"):
+            table.add_column(col)
+        for r in rows:
+            pushed = "yes" if r["pushed"] else (r["push_error"] or "no")[:30]
+            routine = fmt_ms(r["routine_ts"]) if r["routine_ts"] else ""
+            table.add_row(fmt_ms(r["ts"]), r["rule"], r["coin"], r["tf"], r["direction"],
+                          r["title"], pushed, routine)  # fmt: skip
+        console.print(table)
+        return
+
+    with httpx.Client() as http:
+        if test_push or test_routine:
+            sample = Alert(
+                "test", "BTC", "4h", "test", None, 3, "hlflows test alert",
+                "If you can read this, alerts reach your phone.", {"test": True},
+            )  # fmt: skip
+            if test_push:
+                if not a.ntfy_topic:
+                    raise typer.BadParameter("set alerts.ntfy_topic in the config first")
+                deliver.send_ntfy(http, a, deliver.ntfy_message(a, sample))
+                console.print(f"sent a test push to topic {a.ntfy_topic[:6]}…")
+            if test_routine:
+                if not (a.routine_fire_url and a.routine_token):
+                    raise typer.BadParameter("set alerts.routine_fire_url and routine_token first")
+                payload = engine.load_payload(engine.flows_path(cfg)) or {"coins": {}}
+                url = deliver.fire_routine(http, a, deliver.routine_text(payload, [sample], a))
+                console.print(f"routine started: {url}")
+            return
+
+        if not a.enabled:
+            console.print("alerts are disabled (alerts.enabled = false)")
+            return
+        result = engine.run(cfg, conn, http, dry_run=dry_run)
+
+    for x in result.raised:
+        console.print(f"[bold]{x.title}[/]  ({x.rule}, p{x.priority})\n  {x.message}")
+        if dry_run:
+            console.print(f"  [dim]{json_mod.dumps(x.facts, default=str)}[/]")
+    console.print(
+        f"{len(result.raised)} new, {result.suppressed} suppressed by cooldown"
+        + ("" if dry_run else f"; {result.pushes} pushed")
+        + (f"; routine: {result.routine_url}" if result.routine_url else "")
+    )
+    for err in result.push_errors + ([result.routine_error] if result.routine_error else []):
+        console.print(f"[red]error:[/] {err}")
+    if result.push_errors or result.routine_error:
+        raise typer.Exit(1)

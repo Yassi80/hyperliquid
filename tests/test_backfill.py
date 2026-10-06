@@ -35,7 +35,12 @@ async def test_backfill_writes_and_is_idempotent(conn: sqlite3.Connection) -> No
     assert markets == {"HYPE": "HYPE", "HYPE/spot": "@107"}
 
     n_1h = _count(conn, "SELECT COUNT(*) FROM bars WHERE market = 'HYPE' AND res = '1h'")
-    closed_1h = [c for c in fixture_json("candleSnapshot_ETH_1h.json") if c["T"] < now_ms()]
+    # The recorded fixture ages; count only candles inside the requested window.
+    window_start = (start // 3_600_000) * 3_600_000
+    closed_1h = [
+        c for c in fixture_json("candleSnapshot_ETH_1h.json")
+        if c["T"] < now_ms() and c["t"] >= window_start
+    ]  # fmt: skip
     assert n_1h == len(closed_1h)
     assert cov.get_coverage(conn, "bars_1h", "HYPE")
 

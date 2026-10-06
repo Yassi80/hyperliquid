@@ -224,6 +224,26 @@ MIGRATIONS: list[str] = [
     ) WITHOUT ROWID;
     CREATE INDEX liquidations_coin ON liquidations (coin, ts);
     """,
+    # 4: alerts raised by `hlflows alerts` (also the cooldown state).
+    """
+    CREATE TABLE alerts (
+        id          INTEGER PRIMARY KEY,
+        ts          INTEGER NOT NULL,        -- when raised
+        rule        TEXT NOT NULL,
+        coin        TEXT NOT NULL,           -- '*' for system-wide (health)
+        tf          TEXT NOT NULL,           -- timeframe, or '-' for coin-level rules
+        direction   TEXT NOT NULL,
+        bar_ts      INTEGER,                 -- bar (or snapshot) the alert refers to
+        priority    INTEGER NOT NULL,        -- ntfy priority 1-5
+        title       TEXT NOT NULL,
+        message     TEXT NOT NULL,
+        facts       TEXT NOT NULL,           -- JSON: the numbers behind the alert
+        pushed      INTEGER NOT NULL DEFAULT 0,
+        push_error  TEXT,
+        routine_ts  INTEGER                  -- when sent to the Claude routine
+    );
+    CREATE INDEX alerts_key ON alerts (rule, coin, tf, direction, ts);
+    """,
 ]
 
 

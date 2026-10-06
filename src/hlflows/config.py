@@ -101,6 +101,66 @@ class WalletsConfig(msgspec.Struct, forbid_unknown_fields=True):
     liqmap_range_pct: float = 20.0
 
 
+class AlertsConfig(msgspec.Struct, forbid_unknown_fields=True):
+    """Rule-based alerts on the flows data (`hlflows alerts`), pushed via ntfy, with an
+    optional Claude Code routine that writes a read of the situation (see README)."""
+
+    enabled: bool = True
+    flows_path: str = ""  # flows.json written by `dashboard --json`; "" = data_dir/flows.json
+    timeframes: list[str] = msgspec.field(default_factory=lambda: ["1h", "4h", "1d"])
+    disabled_rules: list[str] = msgspec.field(default_factory=list)
+    # Divergence rules compare the last `window_bars` closed bars.
+    window_bars: int = 6
+    # Skip CVD-based rules when bars miss more of their taker split than this allows.
+    min_taker_cov: float = 0.9
+    # A rule doesn't repeat for the same coin/timeframe/direction within this many bars
+    # (and never within min_cooldown_min); coin-level rules use coin_cooldown_min.
+    cooldown_bars: int = 2
+    min_cooldown_min: float = 60.0
+    coin_cooldown_min: float = 240.0
+    # premium_extreme: premium percentile vs its trailing window (funding.percentile_window_days)
+    premium_pct_high: float = 95.0
+    premium_pct_low: float = 5.0
+    # cvd_divergence: price moved at least this much (%, per timeframe) while perp takers
+    # leaned the other way by at least taker_share of volume.
+    divergence_price_pct: dict[str, float] = msgspec.field(
+        default_factory=lambda: {"15m": 0.5, "1h": 1.0, "4h": 2.0, "1d": 4.0, "1w": 8.0}
+    )
+    divergence_taker_share: float = 0.05
+    # spot_perp_divergence: spot and perp takers lean opposite ways (primary spot markets)
+    spot_perp_taker_share: float = 0.05
+    # oi_change: open interest change over the last closed bar (%, per timeframe)
+    oi_change_pct: dict[str, float] = msgspec.field(
+        default_factory=lambda: {"15m": 1.5, "1h": 3.0, "4h": 5.0, "1d": 8.0, "1w": 15.0}
+    )
+    # liq_cluster: watched positions liquidating within this distance of the mark (USD)
+    liq_cluster_distance_pct: float = 3.0
+    liq_cluster_ntl: dict[str, float] = msgspec.field(
+        default_factory=lambda: {"BTC": 25e6, "ETH": 15e6, "SOL": 5e6, "HYPE": 5e6}
+    )
+    # liquidations: liquidations seen in the last closed 1h bar (USD)
+    liquidations_ntl: dict[str, float] = msgspec.field(
+        default_factory=lambda: {"BTC": 5e6, "ETH": 3e6, "SOL": 1e6, "HYPE": 1e6}
+    )
+    # watch_flow: same-wallet watchlist net position change over the last closed bar (USD)
+    watch_flow_ntl: dict[str, float] = msgspec.field(
+        default_factory=lambda: {"BTC": 20e6, "ETH": 10e6, "SOL": 5e6, "HYPE": 5e6}
+    )
+    watch_flow_timeframes: list[str] = msgspec.field(default_factory=lambda: ["4h", "1d"])
+    # health: recorder or data older than this (minutes)
+    stale_after_min: float = 15.0
+    # Delivery: ntfy push (server + secret topic, optional access token).
+    ntfy_server: str = "https://ntfy.sh"
+    ntfy_topic: str = ""
+    ntfy_token: str = ""
+    max_pushes_per_run: int = 5  # more alerts than this in one run go out as one summary
+    dashboard_url: str = ""  # e.g. https://yourname.duckdns.org (alerts link to the view)
+    # Optional: fire a Claude Code routine (API trigger) with the alerts and a snapshot.
+    routine_fire_url: str = ""
+    routine_token: str = ""
+    routine_min_interval_min: float = 15.0
+
+
 class LiquidationProviderConfig(msgspec.Struct, forbid_unknown_fields=True):
     """Optional paid global liquidation stream. Off unless `name` and `api_key` are set."""
 
@@ -153,6 +213,7 @@ class Config(msgspec.Struct, forbid_unknown_fields=True):
     liquidation_provider: LiquidationProviderConfig = msgspec.field(
         default_factory=LiquidationProviderConfig
     )
+    alerts: AlertsConfig = msgspec.field(default_factory=AlertsConfig)
 
     def validate(self) -> None:
         if self.time.week_start not in WEEKDAYS:
@@ -169,6 +230,11 @@ class Config(msgspec.Struct, forbid_unknown_fields=True):
             if missing:
                 raise ValueError(f"wallets.{name} has no threshold for {sorted(missing)}")
         self.wallets.manual = [a.lower() for a in self.wallets.manual]
+        from hlflows.timeutil import TIMEFRAMES
+
+        bad_tfs = set(self.alerts.timeframes + self.alerts.watch_flow_timeframes) - set(TIMEFRAMES)
+        if bad_tfs:
+            raise ValueError(f"alerts timeframes not recognised: {sorted(bad_tfs)}")
         unknown = set(self.markets.spot_tokens) - set(self.markets.coins)
         if unknown:
             raise ValueError(f"markets.spot_tokens has coins not in markets.coins: {unknown}")

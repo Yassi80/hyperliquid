@@ -54,18 +54,16 @@ $HOST {
 		Strict-Transport-Security "max-age=31536000"
 		-Server
 	}
-	log {
-		output file /var/log/caddy/hlflows-access.log {
-			roll_size 10MiB
-			roll_keep 3
-		}
-	}
+	# Access log to stderr, i.e. the journal (journalctl -u caddy), which is size-capped.
+	log
 }
 CADDY
 chmod 640 /etc/caddy/Caddyfile
 chown root:caddy /etc/caddy/Caddyfile
-install -d -o caddy -g caddy /var/log/caddy
-caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+# Validate as the user Caddy runs as: validating as root would create root-owned files
+# (logs, storage) that the service then can't open.
+sudo -u caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+chown -R caddy:caddy /var/log/caddy 2>/dev/null || true   # repair files from older runs
 systemctl enable caddy >/dev/null
 systemctl restart caddy
 

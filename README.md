@@ -291,9 +291,60 @@ every panel's values at that time.
 
 Security: the password travels only over HTTPS. There's no rate limit on login attempts,
 so use a long random password (the generated one is 20 characters). Caddy logs requests
-to `/var/log/caddy/hlflows-access.log` on the VM. The page holds market data and your
+to the VM's journal (`journalctl -u caddy`). The page holds market data and your
 watchlist analysis, no keys or credentials. To take it offline:
 `gcloud compute ssh "$VM" --zone="$ZONE" -- sudo systemctl disable --now caddy`.
+
+### 6. Alerts on your phone (rules + Claude)
+
+After each 5-minute dashboard build the VM runs `hlflows alerts`. Rules check the fresh
+flows data, and new alerts go to your phone at once through [ntfy](https://ntfy.sh).
+Optionally, the VM then starts a Claude Code routine on your Claude subscription. The
+routine reads the alerts plus a compact snapshot and sends a second push with a written
+read of the flows.
+
+| Rule | Fires when (defaults, all in `[alerts]`) |
+|---|---|
+| `cvd_divergence` | price moved ≥1% / 2% / 4% (1h / 4h / 1d) over the last 6 closed bars while perp takers leaned ≥5% of volume the other way |
+| `spot_perp_divergence` | spot and perp takers lean opposite ways (≥5% each), primary spot markets only (HYPE) |
+| `oi_change` | open interest moved ≥3% / 5% / 8% in the last closed bar, labelled long build / short build / covering / unwind |
+| `premium_extreme` | premium percentile ≥95 or ≤5 vs its trailing window |
+| `liq_cluster` | watched liquidations within 3% of the mark ≥ $25M BTC / $15M ETH / $5M SOL, HYPE |
+| `liquidations` | liquidations seen in the last closed hour ≥ $5M BTC / $3M ETH / $1M SOL, HYPE |
+| `watch_flow` | the same watched wallets moved ≥ $20M BTC / $10M ETH / $5M SOL, HYPE net in a 4h or 1d bar |
+| `health` | recorder down, no trade data or stale dashboard for 15 min (urgent priority) |
+
+Rules use closed bars only. A rule doesn't repeat for the same coin, timeframe and
+direction within 2 bars (at least an hour); coin-level rules wait 4 hours. Every alert,
+with the numbers behind it, is stored in the `alerts` table (`hlflows alerts --history 20`),
+so thresholds can later be checked against what price did next. The labels are
+heuristics: none of the thresholds are calibrated yet.
+
+Setup:
+
+1. **ntfy:** install the ntfy app on your phone and subscribe to a long random topic
+   name (e.g. from `openssl rand -hex 12`). The topic name is the secret: anyone who
+   knows it can read the channel.
+2. **Config on the VM** (`/etc/hlflows/hlflows.toml`), then test:
+   ```toml
+   [alerts]
+   ntfy_topic = "hlflows-<random>"
+   dashboard_url = "https://yourname.duckdns.org"
+   ```
+   ```sh
+   gcloud compute ssh "$VM" --zone="$ZONE" -- hlflows alerts --test-push
+   gcloud compute ssh "$VM" --zone="$ZONE" -- hlflows alerts --dry-run   # what would fire now
+   ```
+3. **Optional Claude read:** create a routine at claude.ai/code/routines.
+   - **Prompt:** "Follow deploy/routine/prompt.md in the repository."
+   - **Repository:** this repo (pushed to a private GitHub repo).
+   - **Environment:** network access Custom with `ntfy.sh` allowed, and an `NTFY_TOPIC`
+     credential/variable.
+   - **Trigger:** API. Put the URL and token into `alerts.routine_fire_url` and
+     `alerts.routine_token`, then check with `hlflows alerts --test-routine`.
+
+   Routine runs count against your Claude plan's usage; the VM starts at most one per
+   15 minutes and only when market alerts fire.
 
 ### Disk and cost
 

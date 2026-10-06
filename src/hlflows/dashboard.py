@@ -34,9 +34,10 @@ from hlflows.wallets import positioning as pos
 DEFAULT_TFS = ("15m", "1h", "4h", "1d")
 # Every per-timeframe series the page reads; an empty timeframe still has them all.
 SERIES_KEYS = (
-    "ts", "closed", "o", "h", "l", "c", "volume", "delta", "taker_cov", "spot_taker_cov",
-    "cvd", "spot_cvd", "oi", "funding_8h", "premium", "watch_long", "watch_short",
-    "watch_flow", "liq_long", "liq_short", "res",
+    "ts", "ts_ms", "closed", "o", "h", "l", "c", "volume", "delta", "taker_cov",
+    "spot_taker_cov", "spot_volume", "cvd", "spot_cvd", "oi", "funding_8h", "premium",
+    "watch_long", "watch_short", "watch_flow", "watch_long_sz", "watch_short_sz",
+    "watch_flow_sz", "liq_long", "liq_short", "res",
 )  # fmt: skip
 SUMMARY_TFS = ("15m", "1h", "4h", "1d", "1w")
 
@@ -86,6 +87,7 @@ def build_timeframe(
     spot = data.load_bars(conn, spot_market_id(coin), tf, start, now, ws)
     spot_delta = dict(zip(spot["ts"].to_list(), spot["delta"].to_list(), strict=True))
     spot_cov = dict(zip(spot["ts"].to_list(), spot["taker_cov"].to_list(), strict=True))
+    spot_vol = dict(zip(spot["ts"].to_list(), spot["volume"].to_list(), strict=True))
     ctx = data.load_ctx(conn, coin, tf, start, now, ws)
     oi = dict(zip(ctx["ts"].to_list(), ctx["oi_close"].to_list(), strict=True))
     fb = data.load_funding_bars(conn, coin, tf, start, now, ws)
@@ -105,21 +107,29 @@ def build_timeframe(
     at_close = [_round_at_close(rounds, min(e, now), slack) for e in ends]
     flows = pos.flow_series(conn, coin, at_close, cfg.wallets, cfg.storage.data_dir)
     closes = bars["c"].to_list()
+    # Cumulative same-wallet net flow: in coin units (charted) and in USD at each bar's
+    # close (what the watch_flow alert thresholds are in).
     net_flow_usd: list[float | None] = []
-    running = 0.0
+    net_flow_sz: list[float | None] = []
+    running_usd = running_sz = 0.0
     for f, c in zip(flows, closes, strict=True):
         change = f["net_change"]
         if change is None:
-            net_flow_usd.append(None if f["long_ntl"] is None else running)
+            gap = f["long_ntl"] is None
+            net_flow_usd.append(None if gap else running_usd)
+            net_flow_sz.append(None if gap else running_sz)
         else:
-            running += float(change) * c
-            net_flow_usd.append(running)
+            running_usd += float(change) * c
+            running_sz += float(change)
+            net_flow_usd.append(running_usd)
+            net_flow_sz.append(running_sz)
 
     def pct(x: float | None, scale: float = 100.0) -> float | None:
         return None if x is None else x * scale
 
     return {
         "ts": [_utc(t) for t in ts],
+        "ts_ms": ts,
         "closed": bars["closed"].to_list(),
         "o": bars["o"].to_list(),
         "h": bars["h"].to_list(),
@@ -129,6 +139,7 @@ def build_timeframe(
         "delta": bars["delta"].to_list(),
         "taker_cov": bars["taker_cov"].to_list(),
         "spot_taker_cov": [spot_cov.get(t) for t in ts],
+        "spot_volume": [spot_vol.get(t) for t in ts],
         "cvd": _cvd(bars["delta"].to_list()),
         "spot_cvd": _cvd([spot_delta.get(t) for t in ts]),
         "oi": [oi.get(t) for t in ts],
@@ -137,6 +148,9 @@ def build_timeframe(
         "watch_long": [f["long_ntl"] for f in flows],
         "watch_short": [f["short_ntl"] for f in flows],
         "watch_flow": net_flow_usd,
+        "watch_long_sz": [f["long_sz"] for f in flows],
+        "watch_short_sz": [f["short_sz"] for f in flows],
+        "watch_flow_sz": net_flow_sz,
         "liq_long": liq_long,
         "liq_short": liq_short,
         "res": bars["res"].to_list(),
@@ -174,8 +188,12 @@ def build_coin(
                 "n_long": m["n_long"].to_list(),
                 "n_short": m["n_short"].to_list(),
             }
+    spot = conn.execute(
+        "SELECT significance FROM markets WHERE market = ?", (spot_market_id(coin),)
+    ).fetchone()
     return {
         "coin": coin,
+        "spot_significance": None if spot is None else spot[0],
         "summary": summary,
         "funding": None if stats is None else stats.__dict__ | {"at": fmt_ms(stats.ts)},
         "venues": venues,
@@ -221,6 +239,11 @@ def _clean(obj: Any) -> Any:
     if isinstance(obj, list | tuple):
         return [_clean(v) for v in obj]
     return obj
+
+
+def render_json(payload: dict[str, Any]) -> str:
+    """The same data as a JSON document (flows.json): what alerts and agents read."""
+    return json.dumps(_clean(payload), separators=(",", ":"), allow_nan=False, default=str)
 
 
 def render_html(payload: dict[str, Any]) -> str:

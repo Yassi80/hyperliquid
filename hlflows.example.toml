@@ -94,3 +94,57 @@ HYPE = 100000
 name = ""                         # an adapter registered in hlflows/liquidations/providers.py
 api_key = ""
 poll_s = 60
+
+[alerts]                          # `hlflows alerts`: runs after each dashboard build on the VM
+enabled = true
+timeframes = ["1h", "4h", "1d"]   # timeframes the per-timeframe rules look at
+disabled_rules = []               # any of: premium_extreme, liq_cluster, liquidations,
+                                  # cvd_divergence, spot_perp_divergence, oi_change, watch_flow, health
+window_bars = 6                   # divergence rules compare the last N closed bars
+min_taker_cov = 0.9               # skip CVD rules when bars miss >10% of their taker split
+cooldown_bars = 2                 # a rule doesn't repeat for coin/tf/direction within N bars...
+min_cooldown_min = 60             # ...and never within this many minutes
+coin_cooldown_min = 240           # cooldown for coin-level rules (premium, liq clusters, liquidations)
+premium_pct_high = 95             # premium percentile vs trailing window
+premium_pct_low = 5
+divergence_taker_share = 0.05     # perp takers net >=5% of volume against the price move
+spot_perp_taker_share = 0.05      # spot and perp takers lean opposite ways (primary spot only: HYPE)
+liq_cluster_distance_pct = 3.0    # watched liquidations within this % of mark...
+watch_flow_timeframes = ["4h", "1d"]
+stale_after_min = 15              # health: data older than this
+ntfy_server = "https://ntfy.sh"
+ntfy_topic = ""                   # a long random topic name = your private channel
+ntfy_token = ""                   # only for access-protected topics / self-hosted ntfy
+max_pushes_per_run = 5            # more alerts in one run arrive as a single summary
+dashboard_url = ""                # e.g. "https://yourname.duckdns.org": alerts link to the view
+routine_fire_url = ""             # Claude Code routine API trigger URL (optional)
+routine_token = ""                # its bearer token
+routine_min_interval_min = 15     # at most one routine run per this many minutes
+
+[alerts.divergence_price_pct]     # cvd_divergence: minimum price move over the window, %
+"1h" = 1.0
+"4h" = 2.0
+"1d" = 4.0
+
+[alerts.oi_change_pct]            # oi_change: minimum OI change over the last closed bar, %
+"1h" = 3.0
+"4h" = 5.0
+"1d" = 8.0
+
+[alerts.liq_cluster_ntl]          # liq_cluster: USD of watched liquidations near price
+BTC = 25000000
+ETH = 15000000
+SOL = 5000000
+HYPE = 5000000
+
+[alerts.liquidations_ntl]         # liquidations: USD seen in the last closed hour
+BTC = 5000000
+ETH = 3000000
+SOL = 1000000
+HYPE = 1000000
+
+[alerts.watch_flow_ntl]           # watch_flow: same-wallet net change over the bar, USD
+BTC = 20000000
+ETH = 10000000
+SOL = 5000000
+HYPE = 5000000
