@@ -21,8 +21,13 @@ if ! swapon --show | grep -q /swapfile; then
 fi
 
 echo "== packages"
-apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sqlite3 curl ca-certificates >/dev/null
+# Only touch apt when something is missing, so a broken third-party repository (e.g. Caddy's)
+# can't fail a routine deploy.
+PKGS=(sqlite3 curl ca-certificates)
+if ! dpkg -s "${PKGS[@]}" >/dev/null 2>&1; then
+  apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${PKGS[@]}" >/dev/null
+fi
 
 echo "== user and directories"
 id hlflows >/dev/null 2>&1 || useradd --system --home-dir "$DATA" --shell /usr/sbin/nologin hlflows
