@@ -11,7 +11,7 @@ DEST="${1:-./data}"
 mkdir -p "$DEST"
 
 for dir in trades positions; do
-  # positions/ appears once positions are 14 days old and get archived; skip until then.
+  # positions/ appears once positions are 3 days old and get archived; skip until then.
   if gcloud storage ls "gs://$BUCKET/$dir/" >/dev/null 2>&1; then
     gcloud storage rsync --recursive "gs://$BUCKET/$dir" "$DEST/$dir"
   else

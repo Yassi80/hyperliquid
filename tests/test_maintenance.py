@@ -43,6 +43,21 @@ def test_archive_moves_whole_days_and_queries_still_work(
     assert change == (4.0, 1)
 
 
+def test_flow_series_is_the_same_after_archiving(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    rounds = [D0 + h * HOUR_MS for h in (1, 2, 23)] + [D0 + DAY_MS + h * HOUR_MS for h in (1, 5)]
+    with store.transaction(conn):
+        ws.set_wallet(conn, "0xa", "active", "t", 0)
+        for i, r in enumerate(rounds):
+            add_round(conn, r, 1.0 + i)
+    w = WalletsConfig()
+    asked: list[int | None] = [rounds[0], None, *rounds[1:]]
+    before = pos.flow_series(conn, "BTC", asked, w, str(tmp_path))
+    archive_positions(conn, tmp_path, D0 + 2 * DAY_MS + HOUR_MS)  # both days to Parquet
+    assert conn.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 0
+    assert pos.flow_series(conn, "BTC", asked, w, str(tmp_path)) == before
+    assert [f["long_sz"] for f in before] == [1.0, None, 2.0, 3.0, 4.0, 5.0]
+
+
 def test_prune_local_only_old_partitions(tmp_path: Path) -> None:
     old = tmp_path / "trades" / "market=BTC" / "date=2026-08-01" / "hour=10.parquet"
     new = tmp_path / "trades" / "market=BTC" / "date=2026-09-28" / "hour=10.parquet"

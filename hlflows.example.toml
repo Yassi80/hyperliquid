@@ -4,7 +4,8 @@
 [storage]
 db_path = "data/hlflows.sqlite"   # SQLite database (WAL mode)
 data_dir = "data"                 # raw trades, archived positions and exports (Parquet)
-positions_hot_days = 14           # older positions move from SQLite to data/positions/*.parquet
+positions_hot_days = 3            # older positions move from SQLite to data/positions/*.parquet
+                                  # (~80 MB/day in SQLite at 300 wallets; keep it below RAM)
 local_retention_days = 30         # `maintain --prune` deletes local Parquet older than this
 
 [api]

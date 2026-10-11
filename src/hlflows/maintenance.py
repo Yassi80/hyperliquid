@@ -12,7 +12,7 @@ from pathlib import Path
 import polars as pl
 
 from hlflows import store
-from hlflows.timeutil import DAY_MS, floor_ms, from_ms
+from hlflows.timeutil import DAY_MS, HOUR_MS, floor_ms, from_ms
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +52,8 @@ def archive_positions(
 ) -> list[tuple[int, int]]:
     """Move positions from whole UTC days before `before` into one Parquet file per day,
     then delete them from SQLite. Idempotent: re-running merges and deduplicates.
+    Reads and deletes an hour at a time, so memory stays small and each delete holds the
+    write lock only briefly (the recorder writes every few seconds).
     Returns (day, rows in file) per day archived."""
     cutoff = floor_ms(before, DAY_MS)
     days = [
@@ -63,17 +65,26 @@ def archive_positions(
     ]
     done = []
     for day in days:
-        rows = conn.execute(
-            f"SELECT {', '.join(POSITION_COLUMNS)} FROM positions"
-            " WHERE round_ts >= ? AND round_ts < ?",
-            (day, day + DAY_MS),
-        ).fetchall()
-        df = pl.DataFrame([tuple(r) for r in rows], schema=POSITION_SCHEMA, orient="row")
-        n = _write_merged(df, positions_day_path(data_dir, day), ["round_ts", "address", "coin"])
-        with store.transaction(conn):
-            conn.execute(
-                "DELETE FROM positions WHERE round_ts >= ? AND round_ts < ?", (day, day + DAY_MS)
+        hours = range(day, day + DAY_MS, HOUR_MS)
+        frames = [
+            pl.DataFrame(
+                [tuple(r) for r in conn.execute(
+                    f"SELECT {', '.join(POSITION_COLUMNS)} FROM positions"
+                    " WHERE round_ts >= ? AND round_ts < ?",
+                    (h, h + HOUR_MS),
+                )],
+                schema=POSITION_SCHEMA,
+                orient="row",
             )
+            for h in hours
+        ]  # fmt: skip
+        df = pl.concat(frames)
+        n = _write_merged(df, positions_day_path(data_dir, day), ["round_ts", "address", "coin"])
+        for h in hours:
+            with store.transaction(conn):
+                conn.execute(
+                    "DELETE FROM positions WHERE round_ts >= ? AND round_ts < ?", (h, h + HOUR_MS)
+                )
         done.append((day, n))
         log.info("archived %s positions for %s", n, f"{from_ms(day):%Y-%m-%d}")
     return done
@@ -87,6 +98,22 @@ def read_archived_positions(
         return pl.DataFrame(schema=POSITION_SCHEMA)
     df = pl.read_parquet(path).filter(pl.col("round_ts") == round_ts)
     return df.filter(pl.col("coin") == coin) if coin is not None else df
+
+
+def read_archived_rounds(
+    data_dir: str | Path, day_ms: int, rounds: list[int], coin: str, columns: list[str]
+) -> pl.DataFrame:
+    """Archived positions of one coin for several rounds of the same day, reading only
+    the needed columns and rows of that day's file, once."""
+    path = positions_day_path(data_dir, day_ms)
+    if not path.exists():
+        return pl.DataFrame(schema={c: POSITION_SCHEMA[c] for c in columns})
+    return (
+        pl.scan_parquet(path)
+        .filter(pl.col("coin") == coin, pl.col("round_ts").is_in(rounds))
+        .select(columns)
+        .collect()
+    )
 
 
 def _partition_date(path: Path) -> datetime | None:

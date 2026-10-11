@@ -14,8 +14,8 @@ from dataclasses import dataclass
 import polars as pl
 
 from hlflows.config import WalletsConfig
-from hlflows.maintenance import read_archived_positions
-from hlflows.timeutil import MINUTE_MS
+from hlflows.maintenance import read_archived_positions, read_archived_rounds
+from hlflows.timeutil import DAY_MS, MINUTE_MS, floor_ms
 from hlflows.wallets import store as ws
 
 POSITION_SCHEMA = {
@@ -301,13 +301,16 @@ def positions_by_round(
         ):
             out[r[0]][r[1]] = (r[2], r[3])
     if data_dir is not None:
+        # Rounds already moved to the Parquet archive: one read per day file, not per round.
+        by_day: dict[int, list[int]] = {}
         for r in rounds:
             if not out[r]:
-                df = round_positions(conn, r, coin, data_dir)
-                out[r] = {
-                    a: (s, v)
-                    for a, s, v in zip(df["address"], df["szi"], df["position_value"], strict=True)
-                }
+                by_day.setdefault(floor_ms(r, DAY_MS), []).append(r)
+        cols = ["round_ts", "address", "szi", "position_value"]
+        for day, day_rounds in by_day.items():
+            df = read_archived_rounds(data_dir, day, day_rounds, coin, cols)
+            for t, a, s, v in df.iter_rows():
+                out[t][a] = (s, v)
     return out
 
 
