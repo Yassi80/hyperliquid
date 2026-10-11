@@ -12,7 +12,7 @@ from pathlib import Path
 import polars as pl
 
 from hlflows import store
-from hlflows.timeutil import DAY_MS, HOUR_MS, floor_ms, from_ms
+from hlflows.timeutil import DAY_MS, HOUR_MS, floor_ms, from_ms, now_ms, to_ms
 
 log = logging.getLogger(__name__)
 
@@ -47,15 +47,34 @@ def _write_merged(df: pl.DataFrame, path: Path, key: list[str]) -> int:
     return df.height
 
 
+def hour_close_rounds(conn: sqlite3.Connection, start: int, end: int) -> dict[int, int]:
+    """{hour start: last polling round in that hour} for rounds in [start, end). Bars of
+    1h and longer close on the hour, and charts take the last round before each close."""
+    return {
+        int(r[0]) * HOUR_MS: int(r[1])
+        for r in conn.execute(
+            "SELECT round_ts / ?, MAX(round_ts) FROM snapshot_rounds"
+            " WHERE round_ts >= ? AND round_ts < ? GROUP BY 1",
+            (HOUR_MS, start, end),
+        )
+    }
+
+
 def archive_positions(
-    conn: sqlite3.Connection, data_dir: str | Path, before: int
+    conn: sqlite3.Connection, data_dir: str | Path, before: int, hourly_before: int | None = None
 ) -> list[tuple[int, int]]:
-    """Move positions from whole UTC days before `before` into one Parquet file per day,
-    then delete them from SQLite. Idempotent: re-running merges and deduplicates.
-    Reads and deletes an hour at a time, so memory stays small and each delete holds the
-    write lock only briefly (the recorder writes every few seconds).
-    Returns (day, rows in file) per day archived."""
+    """Archive positions of whole UTC days before `before`. Each day is written once, in
+    full, to data/positions/date=*.parquet (see the archived_days table); SQLite then keeps
+    only its hour-close rounds, which 1h-and-longer charts read, until `hourly_before`
+    (None: keep none). Works an hour at a time, so memory stays small and each delete
+    holds the write lock only briefly (the recorder writes every few seconds).
+    Returns (day, rows in file) for each day written."""
     cutoff = floor_ms(before, DAY_MS)
+    hourly_cutoff = (
+        cutoff if hourly_before is None else min(cutoff, floor_ms(hourly_before, DAY_MS))
+    )
+    archived = {int(r[0]) for r in conn.execute("SELECT day FROM archived_days")}
+    _restore_hour_close_rounds(conn, data_dir, hourly_cutoff, cutoff, archived)
     days = [
         int(r[0])
         for r in conn.execute(
@@ -65,29 +84,92 @@ def archive_positions(
     ]
     done = []
     for day in days:
-        hours = range(day, day + DAY_MS, HOUR_MS)
-        frames = [
-            pl.DataFrame(
-                [tuple(r) for r in conn.execute(
-                    f"SELECT {', '.join(POSITION_COLUMNS)} FROM positions"
-                    " WHERE round_ts >= ? AND round_ts < ?",
-                    (h, h + HOUR_MS),
-                )],
-                schema=POSITION_SCHEMA,
-                orient="row",
-            )
-            for h in hours
-        ]  # fmt: skip
-        df = pl.concat(frames)
-        n = _write_merged(df, positions_day_path(data_dir, day), ["round_ts", "address", "coin"])
-        for h in hours:
+        if day not in archived:
+            n = _write_day(conn, data_dir, day)
             with store.transaction(conn):
                 conn.execute(
-                    "DELETE FROM positions WHERE round_ts >= ? AND round_ts < ?", (h, h + HOUR_MS)
+                    "INSERT OR REPLACE INTO archived_days VALUES (?, ?, ?)", (day, n, now_ms())
                 )
-        done.append((day, n))
-        log.info("archived %s positions for %s", n, f"{from_ms(day):%Y-%m-%d}")
+            done.append((day, n))
+            log.info("archived %s positions for %s", n, f"{from_ms(day):%Y-%m-%d}")
+        keep = {} if day < hourly_cutoff else hour_close_rounds(conn, day, day + DAY_MS)
+        _thin_day(conn, day, keep)
     return done
+
+
+def _write_day(conn: sqlite3.Connection, data_dir: str | Path, day: int) -> int:
+    hours = range(day, day + DAY_MS, HOUR_MS)
+    frames = [
+        pl.DataFrame(
+            [tuple(r) for r in conn.execute(
+                f"SELECT {', '.join(POSITION_COLUMNS)} FROM positions"
+                " WHERE round_ts >= ? AND round_ts < ?",
+                (h, h + HOUR_MS),
+            )],
+            schema=POSITION_SCHEMA,
+            orient="row",
+        )
+        for h in hours
+    ]  # fmt: skip
+    path = positions_day_path(data_dir, day)
+    return _write_merged(pl.concat(frames), path, ["round_ts", "address", "coin"])
+
+
+def _thin_day(conn: sqlite3.Connection, day: int, keep: dict[int, int]) -> None:
+    """Delete the day's positions except the rounds in `keep` ({hour start: round})."""
+    stored = {
+        int(r[0])
+        for r in conn.execute(
+            "SELECT DISTINCT round_ts FROM positions WHERE round_ts >= ? AND round_ts < ?",
+            (day, day + DAY_MS),
+        )
+    }
+    if stored <= set(keep.values()):
+        return
+    for h in range(day, day + DAY_MS, HOUR_MS):
+        with store.transaction(conn):
+            conn.execute(
+                "DELETE FROM positions WHERE round_ts >= ? AND round_ts < ? AND round_ts != ?",
+                (h, h + HOUR_MS, keep.get(h, -1)),
+            )
+
+
+def _restore_hour_close_rounds(
+    conn: sqlite3.Connection, data_dir: str | Path, start: int, end: int, archived: set[int]
+) -> None:
+    """Days in [start, end) archived in full before hour-close rounds were kept in SQLite:
+    copy those rounds back from the day's Parquet file and record the day as archived."""
+    root = positions_dir(data_dir)
+    if not root.exists():
+        return
+    for path in sorted(root.glob("date=*.parquet")):
+        d = _partition_date(path)
+        if d is None:
+            continue
+        day = to_ms(d)
+        if not start <= day < end or day in archived:
+            continue
+        has_rows = conn.execute(
+            "SELECT 1 FROM positions WHERE round_ts >= ? AND round_ts < ? LIMIT 1",
+            (day, day + DAY_MS),
+        ).fetchone()
+        if has_rows:
+            continue  # not archived yet: the main loop handles it
+        keep = list(hour_close_rounds(conn, day, day + DAY_MS).values())
+        lf = pl.scan_parquet(path)
+        df = lf.filter(pl.col("round_ts").is_in(keep)).select(POSITION_COLUMNS).collect()
+        n = int(lf.select(pl.len()).collect().item())
+        with store.transaction(conn):
+            conn.executemany(
+                f"INSERT OR IGNORE INTO positions ({', '.join(POSITION_COLUMNS)})"
+                f" VALUES ({', '.join('?' * len(POSITION_COLUMNS))})",
+                df.iter_rows(),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO archived_days VALUES (?, ?, ?)", (day, n, now_ms())
+            )
+        archived.add(day)
+        log.info("restored %s hour-close positions for %s", df.height, f"{d:%Y-%m-%d}")
 
 
 def read_archived_positions(

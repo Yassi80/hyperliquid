@@ -139,7 +139,7 @@ What runs on the VM:
 | Unit | When | What |
 |---|---|---|
 | `hlflows-recorder.service` | always (restarts on failure) | `hlflows record` |
-| `hlflows-sync.timer` | hourly at :10 | archive positions older than 3 days to Parquet → `gcloud storage rsync` trades and positions to the bucket → delete local Parquet older than 30 days |
+| `hlflows-sync.timer` | hourly at :10 | archive positions older than 3 days to Parquet (their hour-close rounds stay in SQLite for 35 days, for the charts) → `gcloud storage rsync` trades and positions to the bucket → delete local Parquet older than 30 days |
 | `hlflows-dashboard.timer` | every 5 min | rebuild the dashboard page served by Caddy (if set up, see below) |
 | `hlflows-backup.timer` | daily 01:30 UTC | online SQLite backup → gzip → `gs://BUCKET/backups/hlflows-DATE.sqlite.gz` and `latest.sqlite.gz` (dated copies deleted after 14 days) |
 
@@ -481,7 +481,8 @@ This list grows as later phases add data sources.
   tagged); market makers by the activity thresholds above.
 - **Backups and pulled copies lag.** The nightly backup (and the database `pull-data.sh`
   fetches) is up to a day old. Positions older than 3 days live in
-  `data/positions/date=*.parquet`, not in SQLite; the query layer reads both.
+  `data/positions/date=*.parquet`; SQLite keeps only their hour-close rounds (35 days),
+  which is what the 1h/4h/1d charts use. The query layer reads both.
 - **Predicted funding for other venues** comes from Hyperliquid's `predictedFundings`
   (Binance, Bybit, Hyperliquid) and exists only as snapshots; venues that don't list a
   coin are omitted.

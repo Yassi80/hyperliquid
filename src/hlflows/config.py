@@ -16,8 +16,11 @@ class StorageConfig(msgspec.Struct, forbid_unknown_fields=True):
     db_path: str = "data/hlflows.sqlite"
     data_dir: str = "data"
     # Positions older than this move from SQLite to data/positions/date=*.parquet
-    # (`hlflows maintain`); at 300 wallets they grow ~100 MB/day in SQLite.
+    # (`hlflows maintain`); at 300 wallets they grow ~80 MB/day in SQLite.
     positions_hot_days: int = 3
+    # After that, SQLite keeps each archived day's hour-close rounds (~3% of the rows) for
+    # this long, so 1h/4h/1d charts read their watchlist history without Parquet.
+    positions_hourly_days: int = 35
     # `hlflows maintain --prune` deletes local Parquet (raw trades, archived positions)
     # older than this; run it only after those files are synced elsewhere. 0 = never.
     local_retention_days: int = 30

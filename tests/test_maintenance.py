@@ -43,6 +43,61 @@ def test_archive_moves_whole_days_and_queries_still_work(
     assert change == (4.0, 1)
 
 
+def _day_of_rounds(conn: sqlite3.Connection) -> list[int]:
+    """A round every 20 minutes through D0, plus one the next day."""
+    rounds = [D0 + i * 20 * 60_000 for i in range(72)]
+    with store.transaction(conn):
+        ws.set_wallet(conn, "0xa", "active", "t", 0)
+        for i, r in enumerate([*rounds, D0 + DAY_MS + HOUR_MS]):
+            add_round(conn, r, 1.0 + i)
+    return rounds
+
+
+def _sqlite_rounds(conn: sqlite3.Connection, day: int) -> list[int]:
+    return [int(r[0]) for r in conn.execute(
+        "SELECT DISTINCT round_ts FROM positions WHERE round_ts >= ? AND round_ts < ? ORDER BY 1",
+        (day, day + DAY_MS),
+    )]  # fmt: skip
+
+
+def test_archive_keeps_hour_close_rounds_and_writes_each_day_once(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    rounds = _day_of_rounds(conn)
+    before, keep_hourly = D0 + DAY_MS + 12 * HOUR_MS, D0 - DAY_MS
+    assert archive_positions(conn, tmp_path, before, keep_hourly) == [(D0, 72)]
+    hour_close = [D0 + h * HOUR_MS + 40 * 60_000 for h in range(24)]
+    assert _sqlite_rounds(conn, D0) == hour_close == rounds[2::3]
+    assert _sqlite_rounds(conn, D0 + DAY_MS) == [D0 + DAY_MS + HOUR_MS]  # still hot
+    path = positions_day_path(tmp_path, D0)
+
+    assert archive_positions(conn, tmp_path, before, keep_hourly) == []  # idempotent
+    w = WalletsConfig()
+    asked: list[int | None] = list(hour_close)
+    assert pos.flow_series(conn, "BTC", asked, w) == pos.flow_series(
+        conn, "BTC", asked, w, str(tmp_path)
+    )  # hour-close rounds come from SQLite, no Parquet needed
+
+    path.unlink()  # pruned locally; expiring the hour-close rounds must not rewrite it
+    assert archive_positions(conn, tmp_path, before, D0 + DAY_MS) == []
+    assert _sqlite_rounds(conn, D0) == []
+    assert not path.exists()
+
+
+def test_restores_hour_close_rounds_for_days_archived_in_full(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    _day_of_rounds(conn)
+    before = D0 + DAY_MS + 12 * HOUR_MS
+    archive_positions(conn, tmp_path, before)  # no hourly retention: the day leaves SQLite
+    assert _sqlite_rounds(conn, D0) == []
+    with store.transaction(conn):
+        conn.execute("DELETE FROM archived_days")  # as archived by an older version
+    assert archive_positions(conn, tmp_path, before, D0 - DAY_MS) == []
+    assert len(_sqlite_rounds(conn, D0)) == 24
+    assert [tuple(r) for r in conn.execute("SELECT day, rows FROM archived_days")] == [(D0, 72)]
+
+
 def test_flow_series_is_the_same_after_archiving(conn: sqlite3.Connection, tmp_path: Path) -> None:
     rounds = [D0 + h * HOUR_MS for h in (1, 2, 23)] + [D0 + DAY_MS + h * HOUR_MS for h in (1, 5)]
     with store.transaction(conn):

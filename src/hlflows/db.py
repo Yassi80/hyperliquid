@@ -244,6 +244,16 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX alerts_key ON alerts (rule, coin, tf, direction, ts);
     """,
+    # 5: days whose positions have been written to data/positions/date=*.parquet. After
+    # that only the hour-close rounds stay in SQLite, and the day is never written again
+    # (a rewrite after local pruning would overwrite the full file in the bucket).
+    """
+    CREATE TABLE archived_days (
+        day         INTEGER PRIMARY KEY,     -- UTC day start, ms
+        rows        INTEGER NOT NULL,        -- rows in the day's Parquet file
+        archived_at INTEGER NOT NULL
+    ) WITHOUT ROWID;
+    """,
 ]
 
 

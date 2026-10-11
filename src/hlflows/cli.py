@@ -329,8 +329,9 @@ def maintain(
         bool, typer.Option(help="Also delete local Parquet older than local_retention_days")
     ] = False,
 ) -> None:
-    """Archive positions older than storage.positions_hot_days to Parquet (and optionally
-    prune local Parquet already synced elsewhere). Safe while the recorder runs."""
+    """Archive positions older than storage.positions_hot_days to Parquet, keeping their
+    hour-close rounds in SQLite for storage.positions_hourly_days (and optionally prune
+    local Parquet already synced elsewhere). Safe while the recorder runs."""
     from datetime import UTC, datetime
 
     from hlflows import maintenance
@@ -338,8 +339,13 @@ def maintain(
 
     cfg = _config()
     conn = db.connect(cfg.storage.db_path)
-    before = now_ms() - cfg.storage.positions_hot_days * DAY_MS
-    archived = maintenance.archive_positions(conn, cfg.storage.data_dir, before)
+    now = now_ms()
+    archived = maintenance.archive_positions(
+        conn,
+        cfg.storage.data_dir,
+        before=now - cfg.storage.positions_hot_days * DAY_MS,
+        hourly_before=now - cfg.storage.positions_hourly_days * DAY_MS,
+    )
     console.print(f"archived positions for {len(archived)} day(s)")
     if prune:
         removed = maintenance.prune_local(
