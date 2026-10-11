@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -65,3 +66,31 @@ def test_backup_is_a_usable_copy(conn: sqlite3.Connection, tmp_path: Path) -> No
     copy = db.connect(path)
     assert copy.execute("SELECT address FROM wallets").fetchone()[0] == "0xa"
     assert copy.execute("PRAGMA user_version").fetchone()[0] == len(db.MIGRATIONS)
+
+
+def test_backup_completes_while_another_connection_writes(tmp_path: Path) -> None:
+    src = tmp_path / "live.sqlite"
+    writer, reader = db.connect(src), db.connect(src)
+    for i in range(2000):
+        ws.set_wallet(writer, f"0x{i:040x}", "active", "t", i)
+    stop = threading.Event()
+
+    def write() -> None:
+        w = db.connect(src)
+        i = 0
+        while not stop.is_set():
+            ws.set_wallet(w, f"0xw{i:039x}", "active", "t", i)
+            i += 1
+        w.close()
+
+    t = threading.Thread(target=write)
+    t.start()
+    try:
+        path = backup(reader, tmp_path / "copy.sqlite")
+    finally:
+        stop.set()
+        t.join()
+    copy = db.connect(path)
+    assert copy.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    seeded = "SELECT count(*) FROM wallets WHERE address NOT LIKE '0xw%'"
+    assert copy.execute(seeded).fetchone()[0] == 2000

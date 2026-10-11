@@ -11,3 +11,5 @@ Environment=HLFLOWS_CONFIG=/etc/hlflows/hlflows.toml
 Environment=CLOUDSDK_CONFIG=/var/lib/hlflows/.gcloud
 ExecStart=/opt/hlflows-runtime/sync.sh
 Nice=10
+# Runs hourly; a stuck run is killed before the next one is due.
+TimeoutStartSec=45min

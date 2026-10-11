@@ -122,15 +122,15 @@ def prune_local(data_dir: str | Path, older_than_days: int, now: datetime) -> li
 
 
 def backup(conn: sqlite3.Connection, dest: str | Path) -> Path:
-    """Consistent online copy of the database (safe while the recorder writes)."""
+    """Consistent online copy of the database (safe while the recorder writes).
+
+    VACUUM INTO copies one read snapshot in a single pass. The step-wise backup API
+    restarts from scratch whenever another connection writes between steps, so with the
+    recorder writing every few seconds it never finished on a database larger than RAM."""
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     tmp.unlink(missing_ok=True)
-    target = sqlite3.connect(tmp)
-    try:
-        conn.backup(target, pages=4096)
-    finally:
-        target.close()
+    conn.execute("VACUUM INTO ?", (str(tmp),))
     shutil.move(tmp, dest)
     return dest

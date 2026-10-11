@@ -11,3 +11,5 @@ Environment=HLFLOWS_CONFIG=/etc/hlflows/hlflows.toml
 Environment=CLOUDSDK_CONFIG=/var/lib/hlflows/.gcloud
 ExecStart=/opt/hlflows-runtime/backup.sh
 Nice=10
+# A healthy backup takes minutes; never let a stuck one hold the disk for hours.
+TimeoutStartSec=1h
