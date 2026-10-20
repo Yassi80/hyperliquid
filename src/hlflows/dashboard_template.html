@@ -82,10 +82,22 @@
     #chart { height: 1100px; }
     #liqmap { height: 520px; }
   }
+  /* Values under the cursor: pinned to the top-right corner instead of following the cursor. */
+  .readout { position: fixed; top: 12px; right: 12px; z-index: 20; width: 270px; max-width: calc(100vw - 24px);
+             background: var(--surface); border: 1px solid var(--axis); border-radius: 8px; padding: 8px 10px;
+             box-shadow: 0 4px 16px rgba(0,0,0,0.12); font-size: 12px; }
+  .readout .when { font-weight: 600; margin-bottom: 2px; }
+  .readout .ohlc { font-variant-numeric: tabular-nums; white-space: nowrap; margin-bottom: 6px; }
+  .readout .rows { display: grid; grid-template-columns: auto 1fr; gap: 1px 12px; }
+  .readout .rows span:nth-child(odd) { color: var(--ink-2); white-space: nowrap; }
+  .readout .rows span:nth-child(even) { text-align: right; font-variant-numeric: tabular-nums; }
+  .readout i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; }
+  #chart .hoverlayer .legend { display: none; }
   [hidden] { display: none !important; }
 </style>
 </head>
 <body>
+<div class="readout" id="readout" hidden aria-live="off"></div>
 <div class="wrap">
   <header>
     <h1>Hyperliquid flows</h1>
@@ -115,8 +127,8 @@
       <div id="chart" role="img" aria-label="Stacked flow charts"></div>
       <div id="tableview" hidden class="scroll"></div>
       <p class="note">Each panel has its own scale. Blue = buy / long / up, red = sell / short / down.
-        CVD is anchored at the left edge of the window. A bar missing a few minutes of taker data (a reconnect) still counts, and its hover
-        says how much of the bar was covered; breaks in a line are bars with no taker data at all, after which the sum resumes.
+        CVD is anchored at the left edge of the window. A bar missing a few minutes of taker data (a reconnect) still counts, and the readout
+        (top right, while you hover) shows in brackets how much of the bar was covered; breaks in a line are bars with no taker data at all, after which the sum resumes.
         Watchlist positions are in coin units (they also move as wallets join or leave the watchlist); the net-flow panel counts only wallets present at both ends of each bar.</p>
     </div>
     <div class="card">
@@ -153,8 +165,6 @@ const num = (v, d = 2) => isNum(v) ? v.toLocaleString(undefined, { maximumFracti
 const pct = (v, d = 2) => isNum(v) ? (v > 0 ? "+" : "") + v.toFixed(d) + "%" : "—";
 const arrow = (v) => !isNum(v) || v === 0 ? "" : (v > 0 ? "▲ " : "▼ ");
 const covPct = (v) => isNum(v) ? (v * 100).toFixed(1) + "%" : "—";
-// Hover suffix for bars whose taker split is missing some minutes.
-const covLabel = (v) => isNum(v) && v < 0.9995 ? ` (taker split ${(v * 100).toFixed(0)}% of bar)` : "";
 
 function segmented(el, items, current, onPick) {
   el.innerHTML = "";
@@ -273,29 +283,67 @@ function renderChart(c, t) {
   const isolated = (y) => y.map((v, i) => isNum(v) && !isNum(y[i - 1]) && !isNum(y[i + 1]) ? 8 : 0);
   const line = (y, name, color, extra = {}) => ({ type: "scatter", mode: "lines+markers", x, y, name,
     yaxis: extra.yaxis, line: { color, width: 2 }, marker: { color, size: isolated(y) },
-    connectgaps: false, hovertemplate: "%{y:,.2f}", ...extra });
+    connectgaps: false, hoverinfo: "none", ...extra });
   const traces = [
     { type: "candlestick", x, open: t.o, high: t.h, low: t.l, close: t.c, name: "price", yaxis: Y.price,
       increasing: { line: { color: buy, width: 1 }, fillcolor: buy }, decreasing: { line: { color: sell, width: 1 }, fillcolor: sell },
-      showlegend: false },
-    line(t.oi, "open interest", perp, { yaxis: Y.oi, showlegend: false, hovertemplate: "%{y:,.0f}" }),
-    line(t.cvd, "perp CVD", perp, { yaxis: Y.cvd, customdata: t.taker_cov.map(covLabel),
-      hovertemplate: "%{y:,.2f}%{customdata}" }),
-    line(t.spot_cvd, "spot CVD", spotC, { yaxis: Y.spot, customdata: t.spot_taker_cov.map(covLabel),
-      hovertemplate: "%{y:,.2f}%{customdata}" }),
-    line(t.funding_8h, "funding (8h eq.)", perp, { yaxis: Y.fund, hovertemplate: "%{y:.4f}%" }),
-    line(t.premium, "premium (8h)", prem, { yaxis: Y.fund, hovertemplate: "%{y:.4f}%" }),
-    line(t.watch_long_sz, "watchlist long", buy, { yaxis: Y.watch, hovertemplate: "%{y:,.2f}" }),
-    line(t.watch_short_sz, "watchlist short", sell, { yaxis: Y.watch, hovertemplate: "%{y:,.2f}" }),
-    line(t.watch_flow_sz, "net flow", perp, { yaxis: Y.flow, showlegend: false, hovertemplate: "%{y:+,.2f}" }),
-    { type: "bar", x, y: t.liq_long, name: "longs liquidated", yaxis: Y.liq, marker: { color: buy },
-      hovertemplate: "%{y:$,.3s}" },
-    { type: "bar", x, y: t.liq_short, name: "shorts liquidated", yaxis: Y.liq, marker: { color: sell },
-      hovertemplate: "%{y:$,.3s}" },
+      showlegend: false, hoverinfo: "none" },
+    line(t.oi, "open interest", perp, { yaxis: Y.oi, showlegend: false }),
+    line(t.cvd, "perp CVD", perp, { yaxis: Y.cvd }),
+    line(t.spot_cvd, "spot CVD", spotC, { yaxis: Y.spot }),
+    line(t.funding_8h, "funding (8h eq.)", perp, { yaxis: Y.fund }),
+    line(t.premium, "premium (8h)", prem, { yaxis: Y.fund }),
+    line(t.watch_long_sz, "watchlist long", buy, { yaxis: Y.watch }),
+    line(t.watch_short_sz, "watchlist short", sell, { yaxis: Y.watch }),
+    line(t.watch_flow_sz, "net flow", perp, { yaxis: Y.flow, showlegend: false }),
+    { type: "bar", x, y: t.liq_long, name: "longs liquidated", yaxis: Y.liq, marker: { color: buy }, hoverinfo: "none" },
+    { type: "bar", x, y: t.liq_short, name: "shorts liquidated", yaxis: Y.liq, marker: { color: sell }, hoverinfo: "none" },
   ];
   layout.barmode = "group"; layout.bargap = 0.25; layout.bargroupgap = 0.1;
   Plotly.react("chart", traces, layout, { responsive: true, displaylogo: false, scrollZoom: false,
     displayModeBar: !TOUCH, modeBarButtonsToRemove: ["select2d", "lasso2d", "autoScale2d"] });
+  bindReadout();
+}
+
+// The values of the bar under the cursor, in a fixed box (top right) rather than a label that
+// follows the cursor and covers the charts. Hidden when the cursor leaves the chart, or on tap.
+function showReadout(i) {
+  const t = DATA.coins[state.coin].tfs[state.tf];
+  if (!(i >= 0 && i < t.ts.length)) return;
+  const sw = (v) => `<i style="background:${css(v)}"></i>`;
+  const cov = (v) => isNum(v) && v < 0.9995 ? ` <span class="dim">(${(v * 100).toFixed(0)}%)</span>` : "";
+  const signed = (v, d = 2) => isNum(v) ? (v > 0 ? "+" : "") + num(v, d) : "—";
+  const rows = [
+    [sw("--perp") + "open interest", num(t.oi[i], 0)],
+    [sw("--perp") + "perp CVD", num(t.cvd[i]) + cov(t.taker_cov[i])],
+    [sw("--spot") + "spot CVD", num(t.spot_cvd[i]) + cov(t.spot_taker_cov[i])],
+    [sw("--perp") + "funding (8h eq.)", pct(t.funding_8h[i], 4)],
+    [sw("--premium") + "premium (8h)", pct(t.premium[i], 4)],
+    [sw("--buy") + "watchlist long", num(t.watch_long_sz[i])],
+    [sw("--sell") + "watchlist short", num(t.watch_short_sz[i])],
+    [sw("--perp") + "net flow", signed(t.watch_flow_sz[i])],
+    [sw("--buy") + "longs liquidated", usd(t.liq_long[i])],
+    [sw("--sell") + "shorts liquidated", usd(t.liq_short[i])],
+  ];
+  const el = document.getElementById("readout");
+  const ohlc = [["O", t.o[i]], ["H", t.h[i]], ["L", t.l[i]], ["C", t.c[i]]]
+    .map(([k, v]) => `<span class="dim">${k}</span> ${num(v, 6)}`).join("&nbsp;&nbsp;");
+  el.innerHTML = `<div class="when">${state.coin} · ${t.ts[i]} UTC</div><div class="ohlc">${ohlc}</div><div class="rows">` +
+    rows.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("") + "</div>";
+  el.hidden = false;
+}
+const hideReadout = () => { document.getElementById("readout").hidden = true; };
+let readoutBound = false;
+function bindReadout() {
+  if (readoutBound) return;
+  readoutBound = true;
+  const chart = document.getElementById("chart");
+  chart.on("plotly_hover", (ev) => {
+    const p = ev.points && ev.points[0];
+    if (p) showReadout(p.pointIndex ?? p.pointNumber);
+  });
+  chart.addEventListener("mouseleave", hideReadout);
+  document.getElementById("readout").addEventListener("click", hideReadout);
 }
 
 function renderLiqmap(c) {
@@ -349,6 +397,7 @@ function render() {
   const charts = state.view === "charts";
   document.getElementById("chart").hidden = !charts;
   document.getElementById("tableview").hidden = charts;
+  hideReadout();
   if (charts) renderChart(c, t); else renderTable(t);
   renderLiqmap(c);
 }
