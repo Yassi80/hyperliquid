@@ -378,8 +378,9 @@ internet.
 - **Footprint** (15m and 1h, perps; toggle in the filter row): behind each hollow candle,
   every price level is shaded by its taker delta (blue = more aggressive buying, red =
   more selling) and a dash marks the busiest level (point of control). It reads best
-  zoomed to a few dozen bars; drag a box around a few candles to see sells × buys per
-  level, with diagonal imbalances (≥ 3×) in bold. Hovering the price panel shows the level
+  zoomed to a few dozen bars; zoomed in to about a dozen (drag across the chart; the
+  price axis fits the visible candles) each level shows sells×buys, merging levels as
+  needed to fit the numbers, with diagonal imbalances (≥ 3×) in bold. Hovering the price panel shows the level
   under the cursor in the readout.
 - **Liquidation map** of watched positions around the mark.
 

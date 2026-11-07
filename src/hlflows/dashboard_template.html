@@ -135,8 +135,8 @@
         (top right, while you hover) shows in brackets how much of the bar was covered; breaks in a line are bars with no taker data at all, after which the sum resumes.
         Watchlist positions are in coin units (they also move as wallets join or leave the watchlist); the net-flow panel counts only wallets present at both ends of each bar.
         Footprint: behind each candle, every price level is shaded by its taker delta (blue = more aggressive buying, red = more selling, stronger = larger),
-        and the dash marks the bar's busiest level (point of control). Drag a box around a few candles to see sells × buys per level (coin units);
-        bold marks a diagonal imbalance (buys at a level ≥ 3× sells one level below, or the reverse). Hovering the price panel shows the level under the cursor in the readout.</p>
+        and the dash marks the bar's busiest level (point of control). Zoom in to about a dozen candles (drag across the chart; double-click to zoom back out)
+        to see sells×buys per level in coin units (levels merge as needed to fit the numbers); bold marks a diagonal imbalance (buys at a level ≥ 3× sells one level below, or the reverse). Hovering the price panel shows the level under the cursor in the readout.</p>
     </div>
     <div class="card">
       <h2>Liquidation map (watchlist)</h2>
@@ -258,7 +258,7 @@ function renderChart(c, t) {
   const buy = css("--buy"), sell = css("--sell"), perp = css("--perp"), spotC = css("--spot"), prem = css("--premium");
   // Footprint: a heatmap behind hollow candles (trace 0, so its text can be switched on when zoomed in).
   const f = state.fp ? (c.footprint || {})[state.tf] : null, g = f ? footprintGrid(f, t) : null;
-  FP = g ? { f, g, text: null, showing: false, barMs: barMs(t) } : null;
+  FP = g ? { base: f, f, g, t, m: 1, text: null, showing: false, barMs: barMs(t) } : null;
   document.getElementById("chart").classList.toggle("fp", !!g);
   const ph = (p) => p.key === "price" && g ? 0.42 : p.h;
   const gap = 0.028, n = PANELS.length;
@@ -329,13 +329,27 @@ function renderChart(c, t) {
   Plotly.react("chart", traces, layout, { responsive: true, displaylogo: false, scrollZoom: false,
     displayModeBar: !TOUCH, modeBarButtonsToRemove: ["select2d", "lasso2d", "autoScale2d"] });
   bindReadout();
-  updateFootprintText();
+  updateFootprint();
 }
 
 const rgba = (hex, a) => { const n = parseInt(hex.slice(1), 16); return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`; };
 const barMs = (t) => Math.min(...t.ts_ms.slice(1).map((v, i) => v - t.ts_ms[i]), Infinity);
 const IMBALANCE = 3;
-let FP = null;  // footprint drawn on the chart: { f, g: grid, text, showing, barMs }
+let FP = null;  // footprint drawn on the chart: { base, f: base with m levels merged, g: grid, t, m, text, showing, barMs }
+
+// The footprint with every m levels merged into one (m = 1: as built).
+function mergeLevels(f, m) {
+  if (m === 1) return f;
+  const out = { step: f.step * m, lo: [], buy: [], sell: [], poc: f.poc };
+  f.lo.forEach((l, i) => {
+    if (l === null) { out.lo.push(null); out.buy.push(null); out.sell.push(null); return; }
+    const lo = Math.floor(l / m), n = Math.floor((l + f.buy[i].length - 1) / m) - lo + 1;
+    const b = new Array(n).fill(0), s = new Array(n).fill(0);
+    f.buy[i].forEach((v, k) => { const j = Math.floor((l + k) / m) - lo; b[j] += v; s[j] += f.sell[i][k]; });
+    out.lo.push(lo); out.buy.push(b); out.sell.push(s);
+  });
+  return out;
+}
 
 // The footprint as a heatmap grid: one row per price level across the window, one column per bar.
 // z = buys - sells scaled to [-1, 1] by its 95th percentile, square-rooted so mid-sized imbalances
@@ -374,26 +388,44 @@ function footprintText(f, g) {
       const buyImb = k > 0 && b[k] >= IMBALANCE * s[k - 1] && b[k] >= 0.1 * big;
       const sellImb = k < b.length - 1 && s[k] >= IMBALANCE * b[k + 1] && s[k] >= 0.1 * big;
       const cell = (v, bold) => bold ? `<b>${szFmt(v)}</b>` : szFmt(v);
-      text[l - g.lo + k][i] = `${cell(s[k], sellImb)} × ${cell(b[k], buyImb)}`;
+      text[l - g.lo + k][i] = `${cell(s[k], sellImb)}×${cell(b[k], buyImb)}`;
     });
   });
   return text;
 }
 
-// On every zoom: point-of-control dashes as wide as a bar, and the numbers only once there is room
-// for them (wide enough bars, tall enough levels).
-function updateFootprintText() {
+// On every zoom: point-of-control dashes as wide as a bar, and once bars are wide enough for numbers,
+// levels merged (x2, x5, x10, ...) until each is tall enough to label.
+function updateFootprint() {
   const gd = document.getElementById("chart");
   if (!FP || !gd._fullLayout) return;
   const xa = gd._fullLayout.xaxis, ya = gd._fullLayout.yaxis;
   const barPx = xa._length / ((xa.r2l(xa.range[1]) - xa.r2l(xa.range[0])) / FP.barMs);
-  const levelPx = ya._length / Math.abs(ya.range[1] - ya.range[0]) * FP.f.step;
-  const show = barPx >= 72 && levelPx >= 12, poc = barPx < 5 ? 0 : Math.round(Math.min(40, barPx * 0.8));
-  if (show === FP.showing && poc === FP.poc) return;
+  const basePx = ya._length / Math.abs(ya.range[1] - ya.range[0]) * FP.base.step;
+  const show = barPx >= 60, poc = barPx < 5 ? 0 : Math.round(Math.min(40, barPx * 0.8));
+  const m = !show ? 1 : [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000].find(k => basePx * k >= 13) || 1000;
+  if (show === FP.showing && m === FP.m && poc === FP.poc) return;
+  if (m !== FP.m) {
+    const f = mergeLevels(FP.base, m), g = footprintGrid(f, FP.t);
+    if (g) { FP.f = f; FP.g = g; FP.m = m; FP.text = null; }
+  }
   if (show && !FP.text) FP.text = footprintText(FP.f, FP.g);
   FP.showing = show; FP.poc = poc;
-  Plotly.restyle(gd, { text: [show ? FP.text : null], texttemplate: show ? "%{text}" : "" }, [0]);
+  Plotly.restyle(gd, { z: [FP.g.z], y: [FP.g.y], text: [show ? FP.text : null], texttemplate: show ? "%{text}" : "" }, [0]);
   Plotly.restyle(gd, { "marker.size": poc }, [2]);
+}
+
+// Zooming or panning in time fits the price axis to the visible candles (Plotly keeps the whole
+// window's price range otherwise, which leaves footprint levels too thin to read).
+function fitPriceAxis() {
+  const gd = document.getElementById("chart"), t = DATA.coins[state.coin].tfs[state.tf], xa = gd._fullLayout.xaxis;
+  const [a, b] = xa.range.map(v => xa.r2l(v));
+  const half = barMs(t) / 2;
+  let lo = Infinity, hi = -Infinity;
+  t.ts_ms.forEach((ms, i) => { if (ms >= a - half && ms <= b + half && isNum(t.l[i])) { lo = Math.min(lo, t.l[i]); hi = Math.max(hi, t.h[i]); } });
+  if (!isFinite(lo)) return updateFootprint();
+  const pad = (hi - lo) * 0.04 || hi * 0.001;
+  Plotly.relayout(gd, { "yaxis.range": [lo - pad, hi + pad] });
 }
 
 // The values of the bar under the cursor, in a fixed box (top right) rather than a label that
@@ -445,7 +477,11 @@ function bindReadout() {
     const p = (ev.points || []).find(q => Number.isInteger(q.pointIndex ?? q.pointNumber));
     if (p) showReadout(p.pointIndex ?? p.pointNumber);
   });
-  chart.on("plotly_relayout", updateFootprintText);
+  chart.on("plotly_relayout", (ev) => {
+    const timeZoomed = ev && ("xaxis.range[0]" in ev || "xaxis.range" in ev);
+    const priceZoomed = ev && ("yaxis.range[0]" in ev || "yaxis.range" in ev);
+    if (timeZoomed && !priceZoomed) fitPriceAxis(); else updateFootprint();
+  });
   // Price under the cursor, for the footprint level in the readout.
   chart.addEventListener("mousemove", (ev) => {
     const ya = chart._fullLayout && chart._fullLayout.yaxis;
