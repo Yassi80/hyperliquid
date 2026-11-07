@@ -18,6 +18,7 @@ from typing import Any
 import polars as pl
 
 from hlflows import data
+from hlflows import footprint as fp
 from hlflows import show as show_mod
 from hlflows.config import Config
 from hlflows.markets import spot_market_id
@@ -191,6 +192,7 @@ def build_coin(
     spot = conn.execute(
         "SELECT significance FROM markets WHERE market = ?", (spot_market_id(coin),)
     ).fetchone()
+    series = {tf.name: build_timeframe(cfg, conn, coin, tf, n_bars) for tf in tfs}
     return {
         "coin": coin,
         "spot_significance": None if spot is None else spot[0],
@@ -199,8 +201,30 @@ def build_coin(
         "venues": venues,
         "positioning": positioning,
         "liqmap": liqmap,
-        "tfs": {tf.name: build_timeframe(cfg, conn, coin, tf, n_bars) for tf in tfs},
+        "tfs": series,
+        "footprint": build_footprint(cfg, conn, coin, tfs, series),
     }
+
+
+def build_footprint(
+    cfg: Config, conn: sqlite3.Connection, coin: str, tfs: list[Timeframe],
+    series: dict[str, dict[str, Any]],
+) -> dict[str, Any]:  # fmt: skip
+    """Perp footprint per configured timeframe (see footprint.series), from one read of
+    the stored rows covering the longest window."""
+    tick = fp.tick_for(cfg.footprint, coin)
+    wanted = [tf for tf in tfs if tf.name in cfg.footprint.timeframes and series[tf.name]["ts_ms"]]
+    if tick is None or not wanted:
+        return {}
+    start = min(series[tf.name]["ts_ms"][0] for tf in wanted)
+    rows = fp.load(conn, coin, start, now_ms(), tick)
+    out = {}
+    for tf in wanted:
+        s = series[tf.name]
+        assert tf.fixed_ms is not None
+        out[tf.name] = fp.series(rows, s["ts_ms"], tf.fixed_ms, fp.bar_ranges(s["h"], s["l"]),
+                                 tick, cfg.footprint.levels)  # fmt: skip
+    return out
 
 
 def recorder_line(conn: sqlite3.Connection) -> str:
@@ -242,8 +266,14 @@ def _clean(obj: Any) -> Any:
 
 
 def render_json(payload: dict[str, Any]) -> str:
-    """The same data as a JSON document (flows.json): what alerts and agents read."""
-    return json.dumps(_clean(payload), separators=(",", ":"), allow_nan=False, default=str)
+    """The same data as a JSON document (flows.json): what alerts and agents read. The
+    footprint stays out: it's most of the page's size and only the charts draw it."""
+    coins = {
+        k: {f: v for f, v in c.items() if f != "footprint"} for k, c in payload["coins"].items()
+    }
+    return json.dumps(
+        _clean(payload | {"coins": coins}), separators=(",", ":"), allow_nan=False, default=str
+    )
 
 
 def render_html(payload: dict[str, Any]) -> str:

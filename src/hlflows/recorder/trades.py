@@ -14,6 +14,7 @@ from pathlib import Path
 
 import polars as pl
 
+from hlflows import footprint
 from hlflows.api import types as t
 from hlflows.store import Bar
 from hlflows.timeutil import HOUR_MS, MINUTE_MS, floor_ms, from_ms
@@ -120,9 +121,13 @@ def hour_path(trades_dir: Path, market: str, hour: int) -> Path:
 
 
 def flush_raw_trades(
-    conn: sqlite3.Connection, trades_dir: Path, before: int
+    conn: sqlite3.Connection,
+    trades_dir: Path,
+    before: int,
+    ticks: Mapping[str, float] | None = None,
 ) -> list[tuple[str, int, int]]:
-    """Write every staged hour that ended before `before` to Parquet, then unstage it.
+    """Write every staged hour that ended before `before` to Parquet, then unstage it,
+    and store the hour's footprint for markets with a tick in `ticks`.
 
     Idempotent: if a file for the hour already exists (e.g. a crash between writing it
     and deleting the staged rows), rows are merged and deduplicated by tid.
@@ -149,6 +154,8 @@ def flush_raw_trades(
         tmp = path.with_suffix(".parquet.tmp")
         df.write_parquet(tmp, compression="zstd")
         tmp.replace(path)
+        if ticks and market in ticks:
+            footprint.replace_hour(conn, market, hour, ticks[market], df)
         conn.execute(
             "DELETE FROM trades_staging WHERE market = ? AND ts >= ? AND ts < ?",
             (market, hour, hour + HOUR_MS),

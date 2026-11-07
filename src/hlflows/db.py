@@ -254,6 +254,19 @@ MIGRATIONS: list[str] = [
         archived_at INTEGER NOT NULL
     ) WITHOUT ROWID;
     """,
+    # 6: footprint (footprint.py): taker volume per 15 minutes and price level, written
+    # with each hour of raw trades.
+    """
+    CREATE TABLE footprint (
+        market  TEXT NOT NULL,
+        ts      INTEGER NOT NULL,            -- 15m start, ms
+        lvl     INTEGER NOT NULL,            -- prices [lvl * tick, (lvl + 1) * tick)
+        tick    REAL NOT NULL,
+        buy_sz  REAL NOT NULL,               -- taker buys, coin units
+        sell_sz REAL NOT NULL,               -- taker sells, coin units
+        PRIMARY KEY (market, ts, lvl)
+    ) WITHOUT ROWID;
+    """,
 ]
 
 
@@ -268,6 +281,9 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")
+    # SQLite reuses the WAL file but never shrinks it; truncate it to this after each
+    # checkpoint, so one big transaction (e.g. archiving) doesn't hold the disk forever.
+    conn.execute("PRAGMA journal_size_limit = 67108864")
     migrate(conn)
     return conn
 

@@ -37,7 +37,7 @@ import websockets
 from websockets.asyncio.client import ClientConnection
 
 from hlflows import coverage as cov
-from hlflows import store
+from hlflows import footprint, store
 from hlflows.api import types as t
 from hlflows.api.client import InfoClient
 from hlflows.backfill import backfill_candles, backfill_funding, refresh_markets, snapshot_context
@@ -128,6 +128,7 @@ class Recorder:
         self.markets: dict[str, MarketState] = {}
         self.by_hl: dict[str, str] = {}
         self.coin_of: dict[str, str] = {}  # market -> coin
+        self.fp_ticks: dict[str, float] = {}  # market -> footprint price step
         self.wallets = WalletTracker(cfg, conn, client, clock)
         self.provider: LiquidationProvider | None = make_provider(cfg.liquidation_provider)
         self.ctx: dict[str, CtxState] = {}  # by perp hl_name
@@ -187,6 +188,9 @@ class Recorder:
             self.markets[m.market] = MarketState(m, self._windows(), built_upto=start_minute)
             self.by_hl[m.hl_name] = m.market
             self.coin_of[m.market] = m.coin
+            tick = footprint.tick_for(self.cfg.footprint, m.market)
+            if tick is not None:
+                self.fp_ticks[m.market] = tick
             if m.kind == "perp":
                 self.ctx[m.hl_name] = CtxState(m.coin, self._windows())
         if not self.markets:
@@ -509,7 +513,7 @@ class Recorder:
         # Only hours that finished before the flush horizon; the rest stay staged.
         horizon = floor_ms(before, HOUR_MS)
         with store.transaction(self.conn):
-            written = flush_raw_trades(self.conn, self.trades_dir, horizon)
+            written = flush_raw_trades(self.conn, self.trades_dir, horizon, self.fp_ticks)
         self._flushed_before = max(self._flushed_before, horizon)
         for market, hour, n in written:
             log.info("wrote %s trades for %s %s", n, market, fmt_ms(hour))

@@ -72,6 +72,7 @@
   .filters > span { display: inline-flex; align-items: center; flex-wrap: wrap; }
   @media (max-width: 1000px) { .grid2 { grid-template-columns: minmax(0, 1fr); } }
   #chart { width: 100%; height: 1180px; }
+  #chart.fp { height: 1420px; }  /* a taller price panel, so footprint levels have room */
   #liqmap { width: 100%; height: 640px; }
   .stale { color: var(--ink); font-weight: 600; }
   @media (max-width: 640px) {
@@ -80,6 +81,7 @@
     .filters { gap: 8px 12px; }
     .seg button { padding: 6px 10px; }
     #chart { height: 1100px; }
+    #chart.fp { height: 1300px; }
     #liqmap { height: 520px; }
   }
   /* Values under the cursor: pinned to the top-right corner instead of following the cursor. */
@@ -92,6 +94,7 @@
   .readout .rows span:nth-child(odd) { color: var(--ink-2); white-space: nowrap; }
   .readout .rows span:nth-child(even) { text-align: right; font-variant-numeric: tabular-nums; }
   .readout i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; }
+  .readout .fp { font-variant-numeric: tabular-nums; margin: -2px 0 6px; }
   #chart .hoverlayer .legend { display: none; }
   [hidden] { display: none !important; }
 </style>
@@ -108,6 +111,7 @@
     <span><span class="label">Coin</span><span class="seg" id="coins"></span></span>
     <span><span class="label">Timeframe</span><span class="seg" id="tfs"></span></span>
     <span><span class="label">View</span><span class="seg" id="views"></span></span>
+    <span id="fpctl"><span class="label">Footprint</span><span class="seg" id="fpseg"></span><span class="label" id="fpnote"></span></span>
   </div>
 
   <div class="tiles" id="tiles"></div>
@@ -129,7 +133,10 @@
       <p class="note">Each panel has its own scale. Blue = buy / long / up, red = sell / short / down.
         CVD is anchored at the left edge of the window. A bar missing a few minutes of taker data (a reconnect) still counts, and the readout
         (top right, while you hover) shows in brackets how much of the bar was covered; breaks in a line are bars with no taker data at all, after which the sum resumes.
-        Watchlist positions are in coin units (they also move as wallets join or leave the watchlist); the net-flow panel counts only wallets present at both ends of each bar.</p>
+        Watchlist positions are in coin units (they also move as wallets join or leave the watchlist); the net-flow panel counts only wallets present at both ends of each bar.
+        Footprint: behind each candle, every price level is shaded by its taker delta (blue = more aggressive buying, red = more selling, stronger = larger),
+        and the dash marks the bar's busiest level (point of control). Drag a box around a few candles to see sells × buys per level (coin units);
+        bold marks a diagonal imbalance (buys at a level ≥ 3× sells one level below, or the reverse). Hovering the price panel shows the level under the cursor in the readout.</p>
     </div>
     <div class="card">
       <h2>Liquidation map (watchlist)</h2>
@@ -141,12 +148,13 @@
 
 <script>
 const DATA = /*__DATA__*/null;
-const state = { coin: Object.keys(DATA.coins)[0], tf: DATA.tfs.includes("1h") ? "1h" : DATA.tfs[0], view: "charts" };
-// Bookmarkable views: #coin=ETH&tf=15m&view=table
+const state = { coin: Object.keys(DATA.coins)[0], tf: DATA.tfs.includes("1h") ? "1h" : DATA.tfs[0], view: "charts", fp: true };
+// Bookmarkable views: #coin=ETH&tf=15m&view=table&fp=off
 for (const [k, v] of new URLSearchParams(location.hash.slice(1))) {
   if (k === "coin" && v in DATA.coins) state.coin = v;
   if (k === "tf" && DATA.tfs.includes(v)) state.tf = v;
   if (k === "view" && ["charts", "table"].includes(v)) state.view = v;
+  if (k === "fp") state.fp = v !== "off";
 }
 
 // Phones and tablets: tap shows values; drag-to-zoom would trap page scrolling.
@@ -184,6 +192,11 @@ function renderFilters() {
     v => { state.tf = v; render(); });
   segmented(document.getElementById("views"), [["charts", "Charts"], ["table", "Table"]], state.view,
     v => { state.view = v; render(); });
+  const fpTfs = Object.keys(DATA.coins[state.coin].footprint || {});
+  document.getElementById("fpctl").hidden = !fpTfs.length || state.view !== "charts";
+  segmented(document.getElementById("fpseg"), [["on", "On"], ["off", "Off"]], state.fp ? "on" : "off",
+    v => { state.fp = v === "on"; render(); });
+  document.getElementById("fpnote").textContent = fpTfs.includes(state.tf) ? "" : ` (${fpTfs.join(", ")} only)`;
 }
 
 function tile(title, big, rows) {
@@ -243,6 +256,11 @@ const PANELS = [
 function renderChart(c, t) {
   const ink2 = css("--ink-2"), muted = css("--muted"), grid = css("--grid"), axis = css("--axis");
   const buy = css("--buy"), sell = css("--sell"), perp = css("--perp"), spotC = css("--spot"), prem = css("--premium");
+  // Footprint: a heatmap behind hollow candles (trace 0, so its text can be switched on when zoomed in).
+  const f = state.fp ? (c.footprint || {})[state.tf] : null, g = f ? footprintGrid(f, t) : null;
+  FP = g ? { f, g, text: null, showing: false, barMs: barMs(t) } : null;
+  document.getElementById("chart").classList.toggle("fp", !!g);
+  const ph = (p) => p.key === "price" && g ? 0.42 : p.h;
   const gap = 0.028, n = PANELS.length;
   const layout = {
     paper_bgcolor: css("--surface"), plot_bgcolor: css("--surface"),
@@ -263,7 +281,7 @@ function renderChart(c, t) {
   };
   let top = 1.0;
   PANELS.forEach((p, i) => {
-    const bottom = Math.max(0, top - p.h * (1 - gap * (n - 1)) / PANELS.reduce((a, q) => a + q.h, 0) * 1);
+    const bottom = Math.max(0, top - ph(p) * (1 - gap * (n - 1)) / PANELS.reduce((a, q) => a + ph(q), 0) * 1);
     const ax = i === 0 ? "yaxis" : `yaxis${i + 1}`;
     layout[ax] = { domain: [bottom, top], gridcolor: grid, zerolinecolor: axis, linecolor: axis,
                    tickfont: { color: muted }, automargin: true, fixedrange: false };
@@ -284,10 +302,18 @@ function renderChart(c, t) {
   const line = (y, name, color, extra = {}) => ({ type: "scatter", mode: "lines+markers", x, y, name,
     yaxis: extra.yaxis, line: { color, width: 2 }, marker: { color, size: isolated(y) },
     connectgaps: false, hoverinfo: "none", ...extra });
+  const clear = "rgba(0,0,0,0)";
   const traces = [
+    ...(g ? [{ type: "heatmap", x, y: g.y, z: g.z, yaxis: Y.price, zmin: -1, zmax: 1, zauto: false,
+      colorscale: [[0, rgba(sell, 0.8)], [0.5, rgba(sell, 0)], [0.5, rgba(buy, 0)], [1, rgba(buy, 0.8)]],
+      showscale: false, xgap: 1, hoverinfo: "none", showlegend: false, name: "footprint",
+      texttemplate: "", textfont: { size: 10, color: css("--ink") } }] : []),
     { type: "candlestick", x, open: t.o, high: t.h, low: t.l, close: t.c, name: "price", yaxis: Y.price,
-      increasing: { line: { color: buy, width: 1 }, fillcolor: buy }, decreasing: { line: { color: sell, width: 1 }, fillcolor: sell },
+      increasing: { line: { color: buy, width: 1 }, fillcolor: g ? clear : buy },
+      decreasing: { line: { color: sell, width: 1 }, fillcolor: g ? clear : sell },
       showlegend: false, hoverinfo: "none" },
+    ...(g ? [{ type: "scatter", mode: "markers", x, y: f.poc, yaxis: Y.price, name: "point of control",
+      marker: { symbol: "line-ew", size: 6, opacity: 0.75, line: { width: 2, color: css("--ink-2") } }, hoverinfo: "none" }] : []),
     line(t.oi, "open interest", perp, { yaxis: Y.oi, showlegend: false }),
     line(t.cvd, "perp CVD", perp, { yaxis: Y.cvd }),
     line(t.spot_cvd, "spot CVD", spotC, { yaxis: Y.spot }),
@@ -303,6 +329,71 @@ function renderChart(c, t) {
   Plotly.react("chart", traces, layout, { responsive: true, displaylogo: false, scrollZoom: false,
     displayModeBar: !TOUCH, modeBarButtonsToRemove: ["select2d", "lasso2d", "autoScale2d"] });
   bindReadout();
+  updateFootprintText();
+}
+
+const rgba = (hex, a) => { const n = parseInt(hex.slice(1), 16); return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`; };
+const barMs = (t) => Math.min(...t.ts_ms.slice(1).map((v, i) => v - t.ts_ms[i]), Infinity);
+const IMBALANCE = 3;
+let FP = null;  // footprint drawn on the chart: { f, g: grid, text, showing, barMs }
+
+// The footprint as a heatmap grid: one row per price level across the window, one column per bar.
+// z = buys - sells scaled to [-1, 1] by its 95th percentile, square-rooted so mid-sized imbalances
+// still show at full view (null where nothing traded).
+function footprintGrid(f, t) {
+  let lo = Infinity, hi = -Infinity;
+  f.lo.forEach((l, i) => { if (l !== null) { lo = Math.min(lo, l); hi = Math.max(hi, l + f.buy[i].length - 1); } });
+  if (!isFinite(lo) || (hi - lo + 1) * t.ts.length > 600000) return null;
+  const ny = hi - lo + 1, nx = t.ts.length;
+  const z = Array.from({ length: ny }, () => new Array(nx).fill(null));
+  const mags = [];
+  f.lo.forEach((l, i) => {
+    if (l === null) return;
+    f.buy[i].forEach((b, k) => {
+      const s = f.sell[i][k];
+      if (b || s) { z[l - lo + k][i] = b - s; mags.push(Math.abs(b - s)); }
+    });
+  });
+  mags.sort((a, b) => a - b);
+  const top = mags[Math.floor(mags.length * 0.95)] || mags[mags.length - 1] || 1;
+  for (const row of z) row.forEach((d, i) => { if (d !== null) row[i] = Math.sign(d) * Math.min(1, Math.sqrt(Math.abs(d) / top)); });
+  return { lo, ny, nx, z, y: Array.from({ length: ny }, (_, j) => (lo + j + 0.5) * f.step) };
+}
+
+const szFmt = (v) => !v ? "0" : v >= 1e3 ? +(v / 1e3).toPrecision(3) + "k" : String(+v.toPrecision(3));
+
+// "sells × buys" per cell; bold = diagonal imbalance (buyers lifting a level at ≥ 3x the sellers hitting
+// the level below, or the reverse), ignoring levels under 10% of the bar's busiest.
+function footprintText(f, g) {
+  const text = Array.from({ length: g.ny }, () => new Array(g.nx).fill(""));
+  f.lo.forEach((l, i) => {
+    if (l === null) return;
+    const b = f.buy[i], s = f.sell[i], big = Math.max(...b, ...s);
+    b.forEach((_, k) => {
+      if (!b[k] && !s[k]) return;
+      const buyImb = k > 0 && b[k] >= IMBALANCE * s[k - 1] && b[k] >= 0.1 * big;
+      const sellImb = k < b.length - 1 && s[k] >= IMBALANCE * b[k + 1] && s[k] >= 0.1 * big;
+      const cell = (v, bold) => bold ? `<b>${szFmt(v)}</b>` : szFmt(v);
+      text[l - g.lo + k][i] = `${cell(s[k], sellImb)} × ${cell(b[k], buyImb)}`;
+    });
+  });
+  return text;
+}
+
+// On every zoom: point-of-control dashes as wide as a bar, and the numbers only once there is room
+// for them (wide enough bars, tall enough levels).
+function updateFootprintText() {
+  const gd = document.getElementById("chart");
+  if (!FP || !gd._fullLayout) return;
+  const xa = gd._fullLayout.xaxis, ya = gd._fullLayout.yaxis;
+  const barPx = xa._length / ((xa.r2l(xa.range[1]) - xa.r2l(xa.range[0])) / FP.barMs);
+  const levelPx = ya._length / Math.abs(ya.range[1] - ya.range[0]) * FP.f.step;
+  const show = barPx >= 72 && levelPx >= 12, poc = barPx < 5 ? 0 : Math.round(Math.min(40, barPx * 0.8));
+  if (show === FP.showing && poc === FP.poc) return;
+  if (show && !FP.text) FP.text = footprintText(FP.f, FP.g);
+  FP.showing = show; FP.poc = poc;
+  Plotly.restyle(gd, { text: [show ? FP.text : null], texttemplate: show ? "%{text}" : "" }, [0]);
+  Plotly.restyle(gd, { "marker.size": poc }, [2]);
 }
 
 // The values of the bar under the cursor, in a fixed box (top right) rather than a label that
@@ -328,19 +419,43 @@ function showReadout(i) {
   const el = document.getElementById("readout");
   const ohlc = [["O", t.o[i]], ["H", t.h[i]], ["L", t.l[i]], ["C", t.c[i]]]
     .map(([k, v]) => `<span class="dim">${k}</span> ${num(v, 6)}`).join("&nbsp;&nbsp;");
-  el.innerHTML = `<div class="when">${state.coin} · ${t.ts[i]} UTC</div><div class="ohlc">${ohlc}</div><div class="rows">` +
-    rows.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("") + "</div>";
+  el.innerHTML = `<div class="when">${state.coin} · ${t.ts[i]} UTC</div><div class="ohlc">${ohlc}</div>` +
+    footprintLine(i) + `<div class="rows">` + rows.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("") + "</div>";
   el.hidden = false;
+  readoutIndex = i;
 }
-const hideReadout = () => { document.getElementById("readout").hidden = true; };
-let readoutBound = false;
+
+// The footprint level under the cursor (when it is over the price panel), else the bar's point of control.
+function footprintLine(i) {
+  if (!FP || FP.f.lo[i] === null) return "";
+  const f = FP.f, k = cursorPrice === null ? -1 : Math.floor(cursorPrice / f.step + 1e-9) - f.lo[i];
+  if (!(k >= 0 && k < f.buy[i].length)) return `<div class="fp"><span class="dim">point of control</span> ${num(f.poc[i], 6)}</div>`;
+  const lo = (f.lo[i] + k) * f.step, b = f.buy[i][k], s = f.sell[i][k], d = b - s;
+  return `<div class="fp"><span class="dim">${num(lo, 6)}–${num(lo + f.step, 6)}</span> ` +
+    `<span class="dim">sells</span> ${szFmt(s)} × <span class="dim">buys</span> ${szFmt(b)} <span class="dim">(Δ ${d > 0 ? "+" : ""}${num(d)})</span></div>`;
+}
+const hideReadout = () => { document.getElementById("readout").hidden = true; readoutIndex = null; };
+let readoutBound = false, readoutIndex = null, cursorPrice = null;
 function bindReadout() {
   if (readoutBound) return;
   readoutBound = true;
   const chart = document.getElementById("chart");
   chart.on("plotly_hover", (ev) => {
-    const p = ev.points && ev.points[0];
+    // Heatmap points carry [row, column]; take the first point with a plain bar index.
+    const p = (ev.points || []).find(q => Number.isInteger(q.pointIndex ?? q.pointNumber));
     if (p) showReadout(p.pointIndex ?? p.pointNumber);
+  });
+  chart.on("plotly_relayout", updateFootprintText);
+  // Price under the cursor, for the footprint level in the readout.
+  chart.addEventListener("mousemove", (ev) => {
+    const ya = chart._fullLayout && chart._fullLayout.yaxis;
+    if (!FP || !ya) return;
+    const py = ev.clientY - chart.getBoundingClientRect().top - ya._offset;
+    const price = py >= 0 && py <= ya._length ? ya.p2l(py) : null;
+    const level = (v) => v === null ? null : Math.floor(v / FP.f.step + 1e-9);
+    if (level(price) === level(cursorPrice)) return;
+    cursorPrice = price;
+    if (readoutIndex !== null) showReadout(readoutIndex);
   });
   chart.addEventListener("mouseleave", hideReadout);
   document.getElementById("readout").addEventListener("click", hideReadout);
@@ -388,7 +503,7 @@ function renderTable(t) {
 }
 
 function render() {
-  history.replaceState(null, "", `#coin=${state.coin}&tf=${state.tf}&view=${state.view}`);
+  history.replaceState(null, "", `#coin=${state.coin}&tf=${state.tf}&view=${state.view}` + (state.fp ? "" : "&fp=off"));
   renderFilters();
   const c = DATA.coins[state.coin], t = c.tfs[state.tf];
   document.getElementById("meta").textContent = `generated ${DATA.generated} UTC · ${DATA.recorder} · ${DATA.coverage_note}`;

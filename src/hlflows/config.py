@@ -203,6 +203,21 @@ class ShowConfig(msgspec.Struct, forbid_unknown_fields=True):
     cvd_slope_bars: int = 20
 
 
+class FootprintConfig(msgspec.Struct, forbid_unknown_fields=True):
+    """Volume per price level within each bar (see footprint.py)."""
+
+    # Price step (USD) the recorder stores footprint volume at, per coin; its spot market
+    # uses the same. The dashboard merges levels into whole multiples of it, so finer only
+    # costs rows. Coins missing here get no footprint. After a change, run
+    # `hlflows rebuild-footprint` so older bars use the new step too.
+    tick: dict[str, float] = msgspec.field(
+        default_factory=lambda: {"BTC": 5.0, "ETH": 0.25, "SOL": 0.02, "HYPE": 0.02}
+    )
+    timeframes: list[str] = msgspec.field(default_factory=lambda: ["15m", "1h"])
+    levels: int = 24  # price levels in a typical (median-range) bar on the dashboard
+    keep_days: int = 35  # `hlflows maintain` deletes stored footprint older than this
+
+
 class Config(msgspec.Struct, forbid_unknown_fields=True):
     storage: StorageConfig = msgspec.field(default_factory=StorageConfig)
     api: ApiConfig = msgspec.field(default_factory=ApiConfig)
@@ -217,6 +232,7 @@ class Config(msgspec.Struct, forbid_unknown_fields=True):
         default_factory=LiquidationProviderConfig
     )
     alerts: AlertsConfig = msgspec.field(default_factory=AlertsConfig)
+    footprint: FootprintConfig = msgspec.field(default_factory=FootprintConfig)
 
     def validate(self) -> None:
         if self.time.week_start not in WEEKDAYS:
@@ -238,6 +254,12 @@ class Config(msgspec.Struct, forbid_unknown_fields=True):
         bad_tfs = set(self.alerts.timeframes + self.alerts.watch_flow_timeframes) - set(TIMEFRAMES)
         if bad_tfs:
             raise ValueError(f"alerts timeframes not recognised: {sorted(bad_tfs)}")
+        for name in self.footprint.timeframes:
+            tf = TIMEFRAMES.get(name)
+            if tf is None or tf.fixed_ms is None or not 15 * 60_000 <= tf.fixed_ms <= 86_400_000:
+                raise ValueError(f"footprint.timeframes: {name!r} must be one of 15m-1d")
+        if any(v <= 0 for v in self.footprint.tick.values()) or self.footprint.levels < 1:
+            raise ValueError("footprint.tick values and footprint.levels must be positive")
         unknown = set(self.markets.spot_tokens) - set(self.markets.coins)
         if unknown:
             raise ValueError(f"markets.spot_tokens has coins not in markets.coins: {unknown}")

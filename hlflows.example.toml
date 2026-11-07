@@ -151,3 +151,14 @@ BTC = 20000000
 ETH = 10000000
 SOL = 5000000
 HYPE = 5000000
+
+[footprint]                       # taker volume per price level within each bar (dashboard)
+timeframes = ["15m", "1h"]        # 15m-1d; shown on the dashboard's price panel
+levels = 24                       # price levels in a typical (median-range) bar
+keep_days = 35                    # `maintain` deletes stored footprint older than this
+
+[footprint.tick]                  # price step (USD) volume is stored at, per coin (spot uses the same);
+BTC = 5.0                         # the dashboard merges whole multiples of it. Finer = more rows.
+ETH = 0.25                        # After a change run `hlflows rebuild-footprint`.
+SOL = 0.02
+HYPE = 0.02

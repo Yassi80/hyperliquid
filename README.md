@@ -56,10 +56,15 @@ uv run hlflows export --coin BTC --tf 1h --from 2026-10-01 --table positioning
 uv run hlflows dashboard --open
 
 # Housekeeping (the GCP timers run these): archive positions older than
-# storage.positions_hot_days to Parquet; --prune also deletes local Parquet older than
-# storage.local_retention_days (only once it's synced elsewhere). Online DB backup.
+# storage.positions_hot_days to Parquet, delete footprint older than footprint.keep_days;
+# --prune also deletes local Parquet older than storage.local_retention_days (only once
+# it's synced elsewhere). Online DB backup.
 uv run hlflows maintain [--prune]
 uv run hlflows backup /path/to/copy.sqlite
+
+# Footprint from the raw-trade Parquet files: once after upgrading, or after changing
+# footprint.tick (the recorder keeps it up to date from then on).
+uv run hlflows rebuild-footprint [--days 30]
 ```
 
 Backfill runs within the shared REST weight budget (`rate_limit.ceiling_pct` of the 1200/min
@@ -370,6 +375,12 @@ internet.
   interest, perp CVD, spot CVD, funding and premium, watchlist long/short notional,
   watchlist net flow (same wallets, cumulative), liquidations. Hover shows every panel's
   value at that time; drag to zoom. A **Table** view lists the same numbers per bar.
+- **Footprint** (15m and 1h, perps; toggle in the filter row): behind each hollow candle,
+  every price level is shaded by its taker delta (blue = more aggressive buying, red =
+  more selling) and a dash marks the busiest level (point of control). It reads best
+  zoomed to a few dozen bars; drag a box around a few candles to see sells × buys per
+  level, with diagonal imbalances (≥ 3×) in bold. Hovering the price panel shows the level
+  under the cursor in the readout.
 - **Liquidation map** of watched positions around the mark.
 
 Colours mean the same thing everywhere: blue = buy / long / up, red = sell / short / down.
@@ -446,6 +457,10 @@ This list grows as later phases add data sources.
 - **The replay on subscribe isn't counted as coverage.** The trades channel resends recent
   trades on every subscribe; they are stored (deduplicated) but don't extend coverage
   backwards, because how far back they reach isn't documented.
+- **Footprint follows the taker split.** It comes from the same recorded trades as delta,
+  so it starts when the recorder did (2026-09-29) and misses the minutes the taker split
+  misses. Levels are stored per 15 minutes at `footprint.tick`; the dashboard merges them
+  into whole multiples of it, about `footprint.levels` per typical bar.
 - **Late trades after an hour is archived.** A trade arriving more than 2 minutes after its
   hour ended goes into the Parquet file but not into that minute's bar (logged). This hasn't
   been observed; the setting is `recorder.flush_grace_s`.

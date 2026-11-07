@@ -89,3 +89,25 @@ def test_series_keys_match_a_full_build(conn: sqlite3.Connection, tmp_path: Path
     cfg = Config(storage=StorageConfig(db_path=":memory:", data_dir=str(tmp_path)))
     t = dash.build_timeframe(cfg, conn, "BTC", TIMEFRAMES["1h"], 8)
     assert set(t) == set(dash.SERIES_KEYS)
+
+
+def test_footprint_is_in_the_page_but_not_in_flows_json(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    with store.transaction(conn):
+        _seed(conn)
+        end = (now_ms() // HOUR_MS) * HOUR_MS
+        conn.executemany(
+            "INSERT INTO trades_staging VALUES ('BTC', ?, ?, ?, ?, 1, 'b', 's', 'h')",
+            [(i, end - HOUR_MS + i * MINUTE_MS, "AB"[i % 2], 99 + i % 3) for i in range(60)],
+        )
+    cfg = Config(storage=StorageConfig(db_path=":memory:", data_dir=str(tmp_path)))
+    payload = dash.build(cfg, conn, ["BTC"], [TIMEFRAMES["1h"], TIMEFRAMES["4h"]], 8)
+    f = payload["coins"]["BTC"]["footprint"]
+    assert set(f) == {"1h"}  # footprint.timeframes: 15m and 1h
+    t = payload["coins"]["BTC"]["tfs"]["1h"]
+    assert f["1h"]["lo"][0] is None  # no trades in the first hour
+    assert sum(f["1h"]["buy"][1]) == 30 and sum(f["1h"]["sell"][1]) == 30
+    assert len(f["1h"]["lo"]) == len(t["ts"])
+    assert "footprint" in dash.render_html(payload)
+    assert "footprint" not in json.loads(dash.render_json(payload))["coins"]["BTC"]

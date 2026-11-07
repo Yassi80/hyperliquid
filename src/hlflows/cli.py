@@ -330,11 +330,12 @@ def maintain(
     ] = False,
 ) -> None:
     """Archive positions older than storage.positions_hot_days to Parquet, keeping their
-    hour-close rounds in SQLite for storage.positions_hourly_days (and optionally prune
-    local Parquet already synced elsewhere). Safe while the recorder runs."""
+    hour-close rounds in SQLite for storage.positions_hourly_days, delete footprint older
+    than footprint.keep_days (and optionally prune local Parquet already synced
+    elsewhere). Safe while the recorder runs."""
     from datetime import UTC, datetime
 
-    from hlflows import maintenance
+    from hlflows import footprint, maintenance
     from hlflows.timeutil import DAY_MS
 
     cfg = _config()
@@ -347,11 +348,31 @@ def maintain(
         hourly_before=now - cfg.storage.positions_hourly_days * DAY_MS,
     )
     console.print(f"archived positions for {len(archived)} day(s)")
+    keep = cfg.footprint.keep_days
+    pruned = footprint.prune(conn, now - keep * DAY_MS)
+    if pruned:
+        console.print(f"deleted {pruned:,} footprint row(s) older than {keep} days")
     if prune:
         removed = maintenance.prune_local(
             cfg.storage.data_dir, cfg.storage.local_retention_days, datetime.now(UTC)
         )
         console.print(f"pruned {len(removed)} local Parquet file(s)")
+
+
+@app.command("rebuild-footprint")
+def rebuild_footprint(
+    days: Annotated[int, typer.Option(help="Rebuild hours from this many days back")] = 30,
+) -> None:
+    """Build the stored footprint from the raw-trade Parquet files (once after upgrading,
+    or after changing footprint.tick). Safe while the recorder runs."""
+    from hlflows import footprint
+    from hlflows.timeutil import DAY_MS
+
+    cfg = _config()
+    conn = db.connect(cfg.storage.db_path)
+    trades_dir = Path(cfg.storage.data_dir) / "trades"
+    n = footprint.rebuild(conn, trades_dir, cfg.footprint, now_ms() - days * DAY_MS)
+    console.print(f"rebuilt the footprint of {n:,} market-hour(s) from {trades_dir}")
 
 
 @app.command()
