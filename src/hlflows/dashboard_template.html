@@ -135,7 +135,7 @@
         (top right, while you hover) shows in brackets how much of the bar was covered; breaks in a line are bars with no taker data at all, after which the sum resumes.
         Watchlist positions are in coin units (they also move as wallets join or leave the watchlist); the net-flow panel counts only wallets present at both ends of each bar.
         Footprint: behind each candle, every price level is shaded by its taker delta (blue = more aggressive buying, red = more selling, stronger = larger),
-        and the dash marks the bar's busiest level (point of control). Zoom in to about a dozen candles (drag across the chart; double-click to zoom back out)
+        and the dash marks the bar's busiest level (point of control). Zoom in to about a dozen candles (mouse wheel over the price panel, or drag across the chart; double-click to zoom back out)
         to see sells×buys per level in coin units (levels merge as needed to fit the numbers); bold marks a diagonal imbalance (buys at a level ≥ 3× sells one level below, or the reverse). Hovering the price panel shows the level under the cursor in the readout.</p>
     </div>
     <div class="card">
@@ -418,14 +418,51 @@ function updateFootprint() {
 // Zooming or panning in time fits the price axis to the visible candles (Plotly keeps the whole
 // window's price range otherwise, which leaves footprint levels too thin to read).
 function fitPriceAxis() {
-  const gd = document.getElementById("chart"), t = DATA.coins[state.coin].tfs[state.tf], xa = gd._fullLayout.xaxis;
-  const [a, b] = xa.range.map(v => xa.r2l(v));
-  const half = barMs(t) / 2;
+  const gd = document.getElementById("chart"), xa = gd._fullLayout.xaxis;
+  const range = priceRange(...xa.range.map(v => xa.r2l(v)));
+  if (range) Plotly.relayout(gd, { "yaxis.range": range }); else updateFootprint();
+}
+
+// Low to high (padded) of the candles between times a and b (ms), or null if there are none.
+function priceRange(a, b) {
+  const t = DATA.coins[state.coin].tfs[state.tf], half = barMs(t) / 2;
   let lo = Infinity, hi = -Infinity;
   t.ts_ms.forEach((ms, i) => { if (ms >= a - half && ms <= b + half && isNum(t.l[i])) { lo = Math.min(lo, t.l[i]); hi = Math.max(hi, t.h[i]); } });
-  if (!isFinite(lo)) return updateFootprint();
+  if (!isFinite(lo)) return null;
   const pad = (hi - lo) * 0.04 || hi * 0.001;
-  Plotly.relayout(gd, { "yaxis.range": [lo - pad, hi + pad] });
+  return [lo - pad, hi + pad];
+}
+
+// Mouse wheel over the price panel zooms time around the cursor (and fits the price axis to the
+// visible candles); a sideways trackpad swipe pans. Elsewhere the wheel scrolls the page as usual.
+// Wheel events are summed and applied once per frame.
+let wheel = null;
+function onWheel(ev) {
+  const chart = document.getElementById("chart"), full = chart._fullLayout;
+  if (!full || state.view !== "charts") return;
+  const xa = full.xaxis, ya = full.yaxis, r = chart.getBoundingClientRect();
+  const px = ev.clientX - r.left - xa._offset, py = ev.clientY - r.top - ya._offset;
+  if (px < 0 || px > xa._length || py < 0 || py > ya._length) return;
+  ev.preventDefault();
+  const unit = ev.deltaMode === 1 ? 33 : ev.deltaMode === 2 ? 500 : 1;  // lines / pages → pixels
+  if (!wheel) {
+    wheel = { zoom: 0, pan: 0, at: px / xa._length };
+    requestAnimationFrame(applyWheel);
+  }
+  if (Math.abs(ev.deltaX) > Math.abs(ev.deltaY)) wheel.pan += ev.deltaX * unit / xa._length;
+  else { wheel.zoom += ev.deltaY * unit; wheel.at = px / xa._length; }
+}
+function applyWheel() {
+  const w = wheel, chart = document.getElementById("chart"), xa = chart._fullLayout.xaxis;
+  wheel = null;
+  const t = DATA.coins[state.coin].tfs[state.tf], bar = barMs(t);
+  const first = t.ts_ms[0] - bar, last = t.ts_ms[t.ts_ms.length - 1] + bar;
+  const [a, b] = xa.range.map(v => xa.r2l(v)), k = Math.exp(w.zoom * 0.002), at = a + (b - a) * w.at;
+  const span = Math.min(last - first, Math.max(3 * bar, (b - a) * k));
+  let na = at - (at - a) / (b - a) * span + w.pan * (b - a);
+  na = Math.min(Math.max(na, first), last - span);
+  const nb = na + span, yr = priceRange(na, nb);
+  Plotly.relayout(chart, { "xaxis.range": [xa.l2r(na), xa.l2r(nb)], ...(yr ? { "yaxis.range": yr } : {}) });
 }
 
 // The values of the bar under the cursor, in a fixed box (top right) rather than a label that
@@ -494,6 +531,7 @@ function bindReadout() {
     if (readoutIndex !== null) showReadout(readoutIndex);
   });
   chart.addEventListener("mouseleave", hideReadout);
+  if (!TOUCH) chart.addEventListener("wheel", onWheel, { passive: false });
   document.getElementById("readout").addEventListener("click", hideReadout);
 }
 
