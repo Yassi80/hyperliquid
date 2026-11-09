@@ -433,10 +433,12 @@ function priceRange(a, b) {
   return [lo - pad, hi + pad];
 }
 
-// Mouse wheel over the price panel zooms time around the cursor (and fits the price axis to the
-// visible candles); a sideways trackpad swipe pans. Elsewhere the wheel scrolls the page as usual.
-// Wheel events are summed and applied once per frame.
-let wheel = null;
+// Mouse wheel over the price panel zooms time and centers the candle under the cursor (and fits
+// the price axis to the visible candles); a sideways trackpad swipe pans. Elsewhere the wheel
+// scrolls the page as usual. Wheel events are summed and applied once per frame. The candle is
+// picked when a wheel gesture starts and kept while the mouse stays put, so continued scrolling
+// zooms into that candle instead of drifting to whatever ends up under the cursor.
+let wheel = null, wheelTarget = null;
 function onWheel(ev) {
   const chart = document.getElementById("chart"), full = chart._fullLayout;
   if (!full || state.view !== "charts") return;
@@ -446,23 +448,41 @@ function onWheel(ev) {
   ev.preventDefault();
   const unit = ev.deltaMode === 1 ? 33 : ev.deltaMode === 2 ? 500 : 1;  // lines / pages → pixels
   if (!wheel) {
-    wheel = { zoom: 0, pan: 0, at: px / xa._length };
+    wheel = { zoom: 0, pan: 0, center: null };
     requestAnimationFrame(applyWheel);
   }
-  if (Math.abs(ev.deltaX) > Math.abs(ev.deltaY)) wheel.pan += ev.deltaX * unit / xa._length;
-  else { wheel.zoom += ev.deltaY * unit; wheel.at = px / xa._length; }
+  if (Math.abs(ev.deltaX) > Math.abs(ev.deltaY)) {
+    wheel.pan += ev.deltaX * unit / xa._length;
+    wheelTarget = null;
+    return;
+  }
+  const now = performance.now();
+  if (!wheelTarget || Math.abs(ev.clientX - wheelTarget.x) > 4 || now - wheelTarget.t > 800) {
+    const [a, b] = xa.range.map(v => xa.r2l(v));
+    wheelTarget = { x: ev.clientX, ms: nearestBar(a + (b - a) * px / xa._length) };
+  }
+  wheelTarget.t = now;
+  wheel.zoom += ev.deltaY * unit;
+  wheel.center = wheelTarget.ms;
 }
 function applyWheel() {
   const w = wheel, chart = document.getElementById("chart"), xa = chart._fullLayout.xaxis;
   wheel = null;
   const t = DATA.coins[state.coin].tfs[state.tf], bar = barMs(t);
   const first = t.ts_ms[0] - bar, last = t.ts_ms[t.ts_ms.length - 1] + bar;
-  const [a, b] = xa.range.map(v => xa.r2l(v)), k = Math.exp(w.zoom * 0.002), at = a + (b - a) * w.at;
+  const [a, b] = xa.range.map(v => xa.r2l(v)), k = Math.exp(w.zoom * 0.002);
   const span = Math.min(last - first, Math.max(3 * bar, (b - a) * k));
-  let na = at - (at - a) / (b - a) * span + w.pan * (b - a);
-  na = Math.min(Math.max(na, first), last - span);
+  let na = (w.center ?? (a + b) / 2) - span / 2 + w.pan * (b - a);
+  na = Math.min(Math.max(na, first), last - span);  // at the ends of the data it can't center
   const nb = na + span, yr = priceRange(na, nb);
   Plotly.relayout(chart, { "xaxis.range": [xa.l2r(na), xa.l2r(nb)], ...(yr ? { "yaxis.range": yr } : {}) });
+}
+// Time (ms) of the candle nearest to ms.
+function nearestBar(ms) {
+  const ts = DATA.coins[state.coin].tfs[state.tf].ts_ms;
+  let lo = 0, hi = ts.length - 1;
+  while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (ts[mid] <= ms) lo = mid; else hi = mid; }
+  return Math.abs(ts[hi] - ms) < Math.abs(ts[lo] - ms) ? ts[hi] : ts[lo];
 }
 
 // The values of the bar under the cursor, in a fixed box (top right) rather than a label that

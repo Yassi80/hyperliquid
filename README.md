@@ -375,7 +375,7 @@ internet.
   interest, perp CVD, spot CVD, funding and premium, watchlist long/short notional,
   watchlist net flow (same wallets, cumulative), liquidations. Hover shows every panel's
   value at that time; drag to zoom, or use the mouse wheel over the price panel (zooms
-  time around the cursor; a sideways swipe pans). A **Table** view lists the same numbers
+  time and centers the candle under the cursor; a sideways swipe pans). A **Table** view lists the same numbers
   per bar.
 - **Footprint** (15m and 1h, perps; toggle in the filter row): behind each hollow candle,
   every price level is shaded by its taker delta (blue = more aggressive buying, red =
